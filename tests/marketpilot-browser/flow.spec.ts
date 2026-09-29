@@ -50,3 +50,17 @@ test("mobile layout, risk settings and paper-only controls", async ({ page }) =>
   await expect(page.getByText("₹450.00", { exact: true })).toBeVisible();
   await page.screenshot({ path: ".marketpilot-e2e/mobile.png", fullPage: true });
 });
+
+test("production protects both the page and API before allowing authenticated persistence", async ({ request, baseURL }) => {
+  test.skip(process.env.MARKETPILOT_E2E_PRODUCTION !== "1", "Production-only access checks");
+  // Native fetch cannot inherit Playwright's configured HTTP credentials.
+  expect((await fetch(new URL("/", baseURL))).status).toBe(401);
+  expect((await fetch(new URL("/api/marketpilot?mode=REPLAY", baseURL))).status).toBe(401);
+  expect((await fetch(new URL("/api/marketpilot", baseURL), { method: "POST" })).status).toBe(401);
+  const authenticated = await request.post("/api/marketpilot", { data: { mode: "REPLAY", command: "refresh" } });
+  expect(authenticated.ok()).toBeTruthy();
+  expect((await authenticated.json()).trades.length).toBeGreaterThan(0);
+  const snapshots = await request.get("/api/marketpilot?mode=REPLAY");
+  expect(snapshots.ok()).toBeTruthy();
+  expect((await snapshots.json()).length).toBeGreaterThan(0);
+});

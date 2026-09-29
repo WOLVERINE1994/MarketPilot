@@ -1,4 +1,85 @@
-# Storage build fix and data-source audit
+# Auditable LIVE feed milestone (after 5387daa)
+
+Verified locally on 2026-09-29, Node v24.14.0 / npm 11.9.0. **Real-account SmartAPI smoke test: NOT VERIFIED.** This checkout has no `.env.local` or reviewed live specification. Broker/provider inputs in automated positive-path tests are mocks; no actual authenticated broker quote was obtained. The existing storage-fix evidence follows below as historical context.
+
+## Final exact commands and results
+
+```powershell
+npm.cmd run verify
+```
+
+Exit **0**. This command runs `npm run lint && npm test && npm run build`: ESLint passed; Vitest **75 tests passed in 5 files**, 2.09 seconds; the default Next.js 16.3.3 **Turbopack** production build passed compilation, TypeScript, page collection and prerendering, including `/api/marketpilot/session`. Native `process.getBuiltinModule("node:sqlite")`, WAL persistence and private proxy access remain intact.
+
+Final production browser-test server, terminal 1:
+
+```powershell
+$env:MARKETPILOT_PASSWORD='marketpilot-local-browser-test'
+$env:MARKETPILOT_DATA_DIR='.marketpilot-e2e/live-audit-final'
+$env:ANGEL_API_KEY=''
+$env:ANGEL_ACCESS_TOKEN=''
+$env:ANGEL_CLIENT_LOCAL_IP=''
+$env:ANGEL_CLIENT_PUBLIC_IP=''
+$env:ANGEL_MAC_ADDRESS=''
+$env:MARKETPILOT_SPECS_FILE=''
+$env:WTI_CONTEXT_URL=''
+$env:BRENT_CONTEXT_URL=''
+$env:OIL_NEWS_URL=''
+npm.cmd run start -- --hostname 127.0.0.1 --port 3115
+```
+
+The password is a loopback-only test fixture, never an application default. Use a fresh isolated test data directory for another browser run.
+
+Browser tests, terminal 2:
+
+```powershell
+$env:MARKETPILOT_E2E_PRODUCTION='1'
+$env:MARKETPILOT_E2E_EXTERNAL='1'
+$env:MARKETPILOT_E2E_PORT='3115'
+npm.cmd run test:e2e
+```
+
+Exit **0**; **3 passed (4.2 seconds)** in Chromium. Verified synthetic replay chart/decision/entry/exit/cost/journal/assessment flow, LIVE disconnected health, zero valid LIVE quotes/fills, data-unavailable assessment wording, date-specific authenticated JSON download, invalid-date rejection, mobile layout/settings and private page/API/report access. Credential-free requests returned **401**. No desktop page errors were captured. Desktop and mobile screenshots were inspected; files are in ignored `.marketpilot-e2e/` (`desktop.png`, `mobile.png`, `live-health.png`, `live-mobile.png`). Production-only checks ran; none were skipped. External server mode avoids the known Windows Playwright managed-server teardown problem; authentication is still tested. The test server was stopped afterward.
+
+The separate actual worker smoke command was:
+
+```powershell
+$env:MARKETPILOT_DATA_DIR='.marketpilot-e2e/live-audit-milestone'
+$env:ANGEL_API_KEY=''
+$env:ANGEL_ACCESS_TOKEN=''
+$env:MARKETPILOT_SPECS_FILE=''
+$env:WTI_CONTEXT_URL=''
+$env:BRENT_CONTEXT_URL=''
+$env:OIL_NEWS_URL=''
+npm.cmd run marketpilot:worker
+```
+
+Against the isolated production server using that same directory, authenticated health/report reads showed **16 UNAVAILABLE attempts, 11 from the separate worker, 0 valid samples, 0 entries, 0 exits, WAIT, worker RUNNING, configured false, connection NOT_VERIFIED**. The measured largest ongoing gap was **67.353 seconds**. The worker was then deliberately stopped with Ctrl+C. This verifies disconnected monitoring/persistence, not a broker connection.
+
+During implementation, one report fixture incorrectly dated an overnight position's entry after its checkpoint; fixing the fixture resolved that assertion. The first expanded production type check caught an array-versus-fixed-tuple error in mocked global context; the mock now explicitly returns the required three-item tuple. Neither fix changed strategy thresholds. Final review corrected an empty-feed false “already used this candle” reason and replaced an unavailable price change's `0.00` display with “Change unavailable”; all checks were rerun afterward. Node's SQLite experimental warning and Playwright's color-environment warning remain non-failing runtime warnings.
+
+## Coverage and boundaries
+
+- Strict SmartAPI identity, finite-positive prices, impossible timestamp/calendar rejection and sanitized errors; held-contract review revalidation and expiry-day exit identity.
+- Durable PENDING/completed/interrupted attempts; stale, future, out-of-order, duplicate, mismatched, malformed and disconnected samples; no invalid-data entry/manual-exit/automatic-exit fills; deferred exits after recovery; measured gaps and worker heartbeat.
+- Separate Node-process recovery of the accepted LIVE watermark and full report, plus the earlier open-position/lockout persistence, WAL, rollback and fail-closed SQLite tests.
+- Exact IST midnight and 23:00 handling; exports beyond 500 decisions; replay/future exclusion; entries/exits/costs/lockouts; historical and overnight open positions reported as unpriced when appropriate.
+- No strategy threshold, default risk limit, brokerage formula, spread or slippage setting was altered. LIVE exit fills now consistently use the accepted observed quote (including target exits), while synthetic replay retains its existing OHLC model.
+
+Five-second polling is sampled, not a complete tick feed. Actual intervals increase with network latency/contention, and gaps include market closures because no exchange-session calendar is configured. The machine clock must be correct. No actual broker session, current MCX monetary specification, live WTI/Brent/news provider, real-world tariff, long-running production uptime or real market execution quality has been verified. No strategy edge is established.
+
+## Changed files
+
+- Feed/contract boundary: `src/marketpilot/adapters/smartapi.ts`, `contracts.ts`, `feed.ts`, `feed-types.ts`.
+- Persistent forward flow: `src/marketpilot/storage.ts`, `engine.ts`, `types.ts`, `rules.ts`, `report.ts`, `scripts/marketpilot-worker.ts`, `src/app/api/marketpilot/session/route.ts`.
+- Dashboard: `src/marketpilot/dashboard.tsx`, `marketpilot.css`.
+- Tests: `tests/live-feed.test.ts`, `session-report.test.ts`, `smartapi-validation.test.ts`, `storage-regression.test.ts`, `marketpilot-browser/flow.spec.ts`.
+- Setup/evidence: `.env.example`, `README.md`, `MARKETPILOT.md`, `FORWARD_SESSION.md`, `VERIFICATION.md`.
+
+Full setup, report semantics, source classifications and evidence required before an edge claim are documented in [FORWARD_SESSION.md](FORWARD_SESSION.md).
+
+---
+
+# Historical storage build fix and data-source audit
 
 Verified on 2026-09-29 with Node v24.14.0 and npm 11.9.0 in the standalone MarketPilot checkout.
 

@@ -33,8 +33,26 @@ test("private trading desk: observed candle → decision → paper fill → cost
   await page.getByRole("button", { name: "LIVE", exact: true }).click();
   await expect(page.getByText("CONTRACT UNVERIFIED", { exact: true })).toBeVisible();
   await expect(page.locator(".mp-signal strong")).toHaveText("WAIT");
-  await expect(page.getByText("UNAVAILABLE", { exact: true })).toHaveCount(3);
+  await expect(page.locator(".mp-context-item").getByText("UNAVAILABLE", { exact: true })).toHaveCount(3);
+  await expect(page.getByRole("heading", { name: "LIVE feed health" })).toBeVisible();
+  await expect(page.getByText("Not configured", { exact: true })).toBeVisible();
+  await expect(page.getByText("NOT VERIFIED", { exact: true })).toBeVisible();
   const live = await command("refresh", "LIVE"); expect(live.trades).toHaveLength(0); expect(live.contract).toBeNull();
+  expect(live.feedHealth.configured).toBe(false); expect(live.feedHealth.validSamples).toBe(0); expect(live.feedHealth.failedSamples).toBeGreaterThan(0);
+  const assessed = await command("assess", "LIVE"); expect(assessed.assessment.text).toContain("Market conclusion unavailable");
+  const date = live.feedHealth.day;
+  const sessionResponse = await request.get(`/api/marketpilot/session?date=${date}`);
+  expect(sessionResponse.ok()).toBeTruthy(); expect(sessionResponse.headers()["content-disposition"]).toContain(`marketpilot-live-forward-${date}-IST.json`);
+  const report = await sessionResponse.json();
+  expect(report.mode).toBe("LIVE"); expect(report.day).toBe(date);
+  expect(report.observations.length).toBeGreaterThan(0); expect(report.decisions.length).toBeGreaterThan(0); expect(report.assessments.length).toBeGreaterThan(0);
+  expect(report.entries).toHaveLength(0); expect(report.exits).toHaveLength(0); expect(report.coverage.validSamples).toBe(0);
+  expect(report.observations.every((o: {status:string;price:number|null}) => o.status === "UNAVAILABLE" && o.price === null)).toBeTruthy();
+  const downloadPromise = page.waitForEvent("download");
+  await page.getByRole("link", { name: "Download LIVE report" }).click();
+  expect((await downloadPromise).suggestedFilename()).toBe(`marketpilot-live-forward-${date}-IST.json`);
+  expect((await request.get("/api/marketpilot/session?date=2026-02-31")).status()).toBe(400);
+  await page.screenshot({ path: ".marketpilot-e2e/live-health.png", fullPage: true });
   const denied = await request.post("/api/marketpilot", { headers: { Origin: "https://untrusted.example" }, data: { mode: "REPLAY", command: "step" } }); expect(denied.status()).toBe(403);
   expect(errors).toEqual([]);
 });
@@ -49,6 +67,11 @@ test("mobile layout, risk settings and paper-only controls", async ({ page }) =>
   await expect(page.getByRole("dialog")).toHaveCount(0);
   await expect(page.getByText("₹450.00", { exact: true })).toBeVisible();
   await page.screenshot({ path: ".marketpilot-e2e/mobile.png", fullPage: true });
+  await page.getByRole("button", { name: "LIVE", exact: true }).click();
+  await expect(page.getByRole("heading", { name: "LIVE feed health" })).toBeVisible();
+  await expect(page.getByLabel("Report date · IST")).toBeVisible();
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBeTruthy();
+  await page.screenshot({ path: ".marketpilot-e2e/live-mobile.png", fullPage: true });
 });
 
 test("production protects both the page and API before allowing authenticated persistence", async ({ request, baseURL }) => {
@@ -57,6 +80,7 @@ test("production protects both the page and API before allowing authenticated pe
   expect((await fetch(new URL("/", baseURL))).status).toBe(401);
   expect((await fetch(new URL("/api/marketpilot?mode=REPLAY", baseURL))).status).toBe(401);
   expect((await fetch(new URL("/api/marketpilot", baseURL), { method: "POST" })).status).toBe(401);
+  expect((await fetch(new URL("/api/marketpilot/session?date=2026-09-14", baseURL))).status).toBe(401);
   const authenticated = await request.post("/api/marketpilot", { data: { mode: "REPLAY", command: "refresh" } });
   expect(authenticated.ok()).toBeTruthy();
   expect((await authenticated.json()).trades.length).toBeGreaterThan(0);

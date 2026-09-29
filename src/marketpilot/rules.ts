@@ -34,7 +34,7 @@ export function decide(state: State, equity: number): Decision {
   if (badFeed) d.reasons.push("New entries blocked: stale/disconnected feed or unverified contract");
   if (bars.length < s.slow + 3) d.reasons.push("Waiting for sufficient observed candles");
   d.reasons.push(...riskBlock(s, state.days.at(-1)!, equity));
-  if (state.lastEntryBar?.slice(0, 16) === last?.time.slice(0, 16)) d.reasons.push("Entry or exit already used this candle; no immediate re-entry");
+  if (state.lastEntryBar && last && state.lastEntryBar.slice(0, 16) === last.time.slice(0, 16)) d.reasons.push("Entry or exit already used this candle; no immediate re-entry");
   const history = bars.slice(-(s.slow + 3));
   if (history.some((b, i) => i > 0 && Date.parse(b.time) - Date.parse(history[i - 1].time) > 120000)) d.reasons.push("Recent candle history contains a feed gap; rebuild continuous evidence");
   if (state.context.some(c => c.block)) d.reasons.push("Global context risk blocker is active");

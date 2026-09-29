@@ -25,6 +25,8 @@ The worker polls every five seconds, advances a playing replay by one candle per
 
 ## First usable flow
 
+For the auditable LIVE milestone, follow [FORWARD_SESSION.md](FORWARD_SESSION.md). The worker now records attempted LIVE monitoring even without credentials. Each quote passes strict ingestion checks before touching candles or simulated fills, and the LIVE health panel separates configuration from verified connectivity. Date-specific LIVE reports include the complete observation and forward paper ledger. The real-account smoke test remains **NOT VERIFIED**.
+
 1. Start in **REPLAY**. The contract, prices, volume, WTI, Brent and news are explicitly synthetic fixtures, not historical or live observations.
 2. Use **Next candle**, or start the worker and choose **Play**. Only observed candles are returned to the browser. The server advances sequentially; there is no seek-ahead API.
 3. Read the decision evidence. If BUY or SELL is eligible, choose **Paper BUY/SELL · 1 lot**. WAIT is expected during weak evidence, paused entries, missing context, or risk lockout.

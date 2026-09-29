@@ -18,6 +18,8 @@ Replay works without broker credentials. Its prices and global context are expli
 
 Read [the setup and risk guide](MARKETPILOT.md) for configuration, private access, data-source limitations, and verification.
 
+The [forward-session guide](FORWARD_SESSION.md) covers the LIVE observation audit, rejected quotes, feed health, date-specific IST reports and exact production session steps. **Real-account smoke test: NOT VERIFIED.** Synthetic replay results do not establish a strategy edge.
+
 ```sh
 npm test
 npm run test:e2e

@@ -16,6 +16,53 @@ function run(dir: string, source: string) {
 }
 
 describe("native SQLite persistence regressions", () => {
+  it("serves a saved dashboard under a SQLite write lock while refusing paper commands", () => {
+    const result = run(workspace(), `
+      import path from 'node:path';
+      import { initial,evaluate,refreshDashboard,operate } from './src/marketpilot/engine.ts';
+      import { db,saveState,MonitorBusyError } from './src/marketpilot/storage.ts';
+      const s=initial('REPLAY');saveState(s,evaluate(s));
+      const {DatabaseSync}=process.getBuiltinModule('node:sqlite');
+      const writer=new DatabaseSync(path.join(process.env.MARKETPILOT_DATA_DIR,'marketpilot.sqlite'));
+      writer.exec('BEGIN IMMEDIATE');
+      const start=Date.now();let refused=false,snapshot;
+      try {
+        snapshot=await refreshDashboard('REPLAY');
+        try {await operate('REPLAY','enter');} catch(e) {refused=e instanceof MonitorBusyError;}
+      } finally {writer.exec('ROLLBACK');writer.close();}
+      const elapsed=Date.now()-start;
+      const recovered=await operate('REPLAY','refresh');
+      console.log(JSON.stringify({refused,elapsed,sameDecision:snapshot.decision.id===s.decision.id,
+        position:snapshot.position,recovered:!!recovered.decision,
+        timeout:db().prepare('PRAGMA busy_timeout').get().timeout,leases:db().prepare('SELECT * FROM leases').all()}));
+    `);
+    expect(result).toMatchObject({ refused: true, sameDecision: true, position: null, recovered: true, timeout: 5000, leases: [] });
+    expect(result.elapsed).toBeLessThan(1500);
+  });
+
+  it("rejects a lease held by another process and acquires it after release", () => {
+    const dir = workspace();
+    run(dir, `
+      import { db } from './src/marketpilot/storage.ts';
+      db().prepare('INSERT INTO leases VALUES (?,?,?)').run('LIVE','other-worker',Date.now()+120000);
+      console.log('{}');
+    `);
+    const blocked = run(dir, `
+      import { exclusive, MonitorBusyError } from './src/marketpilot/storage.ts';
+      let entered=false, busy=false;
+      try { await exclusive('LIVE',async()=>{entered=true;}); } catch(e) { busy=e instanceof MonitorBusyError; }
+      console.log(JSON.stringify({entered,busy}));
+    `);
+    expect(blocked).toEqual({ entered: false, busy: true });
+    const released = run(dir, `
+      import { db, exclusive } from './src/marketpilot/storage.ts';
+      db().prepare('DELETE FROM leases WHERE name=? AND owner=?').run('LIVE','other-worker');
+      const entered=await exclusive('LIVE',async()=>true);
+      console.log(JSON.stringify({entered,leases:db().prepare('SELECT * FROM leases').all()}));
+    `);
+    expect(released).toEqual({ entered: true, leases: [] });
+  });
+
   it("recovers the LIVE observation watermark and complete forward report in a new Node process", () => {
     const dir = workspace();
     const written = run(dir, `

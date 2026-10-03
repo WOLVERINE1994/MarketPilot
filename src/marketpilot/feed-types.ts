@@ -1,4 +1,5 @@
 import type { Contract } from "./types";
+import type { SessionTokenStatus } from "./credentials";
 
 export type ObservationStatus = "PENDING" | "OK" | "STALE" | "FUTURE_DATED" | "OUT_OF_ORDER" | "DUPLICATE" | "CONTRACT_MISMATCH" | "MALFORMED" | "UNAVAILABLE" | "INTERRUPTED";
 export type LiveObservation = {
@@ -15,6 +16,8 @@ export type LiveObservation = {
 };
 export type FeedHealth = {
   configured: boolean;
+  missingSettings: string[];
+  sessionTokenStatus: SessionTokenStatus;
   connection: "CONNECTED_AND_VERIFIED" | "NOT_VERIFIED" | "DISCONNECTED";
   lastValidExchangeTime: string | null;
   lastReceiptTime: string | null;

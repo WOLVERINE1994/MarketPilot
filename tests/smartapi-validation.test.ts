@@ -85,6 +85,14 @@ describe("sanitized broker quote validation", () => {
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: true, json: async () => { throw new Error("secret malformed response text"); } }));
     await expect(quote(contract)).rejects.toMatchObject({ status: "MALFORMED", message: "SmartAPI quote is malformed" });
   });
+
+  it("normalizes an existing Bearer prefix without duplicating it", async () => {
+    configure(); vi.stubEnv("ANGEL_ACCESS_TOKEN", "Bearer test-session-token");
+    const fetcher = vi.fn().mockResolvedValue({ ok: true, json: async () => payload() });
+    vi.stubGlobal("fetch", fetcher);
+    await quote(contract);
+    expect(fetcher.mock.calls[0][1].headers.Authorization).toBe("Bearer test-session-token");
+  });
 });
 
 describe("held contract reverification", () => {

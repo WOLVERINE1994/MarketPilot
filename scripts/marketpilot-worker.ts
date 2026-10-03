@@ -5,9 +5,7 @@ process.on("SIGTERM", () => { stopping = true; });
 async function main() {
   console.log("MarketPilot monitor: paper trading only; 5-second polling. Keep this process running.");
   while (!stopping) {
-    for (const mode of ["REPLAY", "LIVE"] as const) {
-      try { await operate(mode, "worker"); } catch { console.error(`${mode}: monitor tick failed or another update is in progress`); }
-    }
+    try { await operate("LIVE", "worker"); } catch { console.error("LIVE: monitor tick failed or another update is in progress"); }
     await new Promise(resolve => setTimeout(resolve, 5000));
   }
 }

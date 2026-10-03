@@ -10,7 +10,12 @@ export function decide(state: State, equity: number): Decision {
   const momentum = prev ? (price - prev) / prev * 100 : 0;
   const recent = bars.slice(-14);
   const atr = recent.reduce((a, b, i) => a + Math.max(b.high - b.low, Math.abs(b.high - (recent[i - 1]?.close ?? b.open)), Math.abs(b.low - (recent[i - 1]?.close ?? b.open))), 0) / Math.max(1, recent.length);
-  const d: Decision = { id: crypto.randomUUID(), time: now, action: "WAIT", reasons: [], ruleVersion: "transparent-1.0.0", entry: null, stop: null, target: null, estimatedCosts: 0, maxRisk: 0, exitCondition: "Stop, 2R target, trend/momentum reversal, data failure, or risk lockout; adverse gaps can exceed planned loss.", snapshot: { candles: structuredClone(bars.slice(-Math.max(s.slow + 3, 15))), position: structuredClone(p), day: { ...state.days.at(-1)! }, equity, price: last ? price : null, fast, slow, momentum, atr, feed: state.feed, contract, context: structuredClone(state.context), settings: { ...s } } };
+  const d: Decision = { id: crypto.randomUUID(), time: now, action: "WAIT", reasons: [], ruleVersion: "transparent-1.1.0", entry: null, stop: null, target: null, estimatedCosts: 0, maxRisk: 0, exitCondition: "Stop, 2R target, trend/momentum reversal, data failure, or risk lockout; adverse gaps can exceed planned loss.", snapshot: { session: structuredClone(state.session), candles: structuredClone(bars.slice(-Math.max(s.slow + 3, 15))), position: structuredClone(p), day: { ...state.days.at(-1)! }, equity, price: last ? price : null, fast, slow, momentum, atr, feed: state.feed, contract, context: structuredClone(state.context), settings: { ...s } } };
+  const session = state.session, sessionTime = Date.parse(now);
+  const sessionOpen = !!session && session.status === "OPEN" && session.entriesAllowed && session.day === istDay(now) &&
+    Number.isFinite(Date.parse(session.opensAt ?? "")) && Number.isFinite(Date.parse(session.closesAt ?? "")) &&
+    sessionTime >= Date.parse(session.opensAt!) && sessionTime < Date.parse(session.closesAt!) - 5 * 60000;
+  const sessionReason = session?.status === "OPEN" ? "MCX session is no longer verified open at the current IST time; new entries blocked" : session?.reason ?? "MCX session unverified; new entries blocked";
   const badFeed = state.feed !== "CONNECTED" || !fresh(state.feedTime, now) || !contract?.verified;
   if (p) {
     d.entry = p.entry; d.stop = p.stop; d.target = p.target; d.maxRisk = p.maxRisk;
@@ -28,9 +33,11 @@ export function decide(state: State, equity: number): Decision {
     if (state.mode === "LIVE" && istDay(now) >= p.contract.expiry) d.reasons.push("Contract expiry reached; close the paper position");
     if (state.feed === "REPLAY ENDED") d.reasons.push("Replay complete: liquidate at the final observed price");
     else if (badFeed) d.reasons.push("Data unavailable or stale: EXIT required; fill deferred until a fresh quote");
-    if (d.reasons.length) d.action = "EXIT"; else d.reasons.push("Open thesis intact; keep the original stop and fixed one-lot size");
+    if (state.mode === "LIVE" && !sessionOpen) d.reasons.push(`${sessionReason}; protective exit required when fresh data permits`);
+    if (d.reasons.length) d.action = "EXIT"; else { d.action = "HOLD"; d.reasons.push("Open thesis intact; keep the original stop and fixed one-lot size"); }
     return d;
   }
+  if (state.mode === "LIVE" && !sessionOpen) d.reasons.push(sessionReason);
   if (badFeed) d.reasons.push("New entries blocked: stale/disconnected feed or unverified contract");
   if (bars.length < s.slow + 3) d.reasons.push("Waiting for sufficient observed candles");
   d.reasons.push(...riskBlock(s, state.days.at(-1)!, equity));

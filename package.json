@@ -13,7 +13,9 @@
     "lint": "eslint",
     "test": "vitest run",
     "test:e2e": "playwright test --config=playwright.marketpilot.config.ts",
-    "verify": "npm run lint && npm test && npm run build"
+    "verify": "npm run lint && npm test && npm run build",
+    "marketpilot:check": "tsx --env-file-if-exists=.env.local scripts/marketpilot-check.ts",
+    "marketpilot:login": "tsx scripts/marketpilot-login.ts"
   },
   "dependencies": {
     "lucide-react": "^1.35.0",

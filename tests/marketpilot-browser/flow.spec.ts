@@ -1,12 +1,14 @@
 import { test, expect } from "@playwright/test";
-test("private trading desk: observed candle → decision → paper fill → costs → journal → assessment", async ({ page, request }) => {
+test("live-only trading desk and isolated paper ledger validation", async ({ page, request }) => {
   const errors: string[] = []; page.on("pageerror", e => errors.push(e.message));
   await page.goto("/");
   await expect(page.getByRole("heading", { name: "Your market, in focus." })).toBeVisible();
-  await expect(page.getByText("Replay workspace", { exact: true })).toBeVisible();
-  await expect(page.getByRole("img", { name: /candlestick chart/ })).toBeVisible();
+  await expect(page.getByText("Live prices \u00b7 paper trades", { exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "REPLAY", exact: true })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Next candle", exact: true })).toHaveCount(0);
+  await expect(page.getByText("Waiting for verified market data", { exact: true })).toBeVisible();
   await page.getByRole("button", { name: "5m", exact: true }).click();
-  await expect(page.getByRole("img", { name: /5-minute/ })).toBeVisible();
+  await expect(page.getByRole("button", { name: "5m", exact: true })).toHaveClass("selected");
   const command = async (command: string, mode = "REPLAY") => { const r = await request.post("/api/marketpilot", { data: { mode, command } }); expect(r.ok()).toBeTruthy(); return r.json(); };
   let state = await command("refresh");
   if (state.position) await command("exit");
@@ -14,9 +16,11 @@ test("private trading desk: observed candle → decision → paper fill → cost
   for (let i = 0; i < 25 && !["BUY", "SELL"].includes(state.decision.action); i++) state = await command("step");
   expect(["BUY", "SELL"]).toContain(state.decision.action);
   await page.reload();
-  const entry = page.getByRole("button", { name: /Paper (BUY|SELL) · 1 lot/ });
-  await expect(entry).toBeEnabled(); await entry.click();
-  await expect(page.getByText("OPEN PAPER POSITION", { exact: true })).toBeVisible();
+  // Synthetic validation remains isolated behind the API; the dashboard always uses LIVE.
+  state = await command("enter");
+  expect(state.position).not.toBeNull();
+  await expect(page.getByText("No open position", { exact: true })).toBeVisible();
+  await expect(page.locator(".mp-signal strong")).toHaveText("WAIT");
   state = await command("refresh"); expect(state.position.maxRisk).toBeGreaterThan(0); expect(state.position.entryCosts).toBeGreaterThan(0);
   const count = state.trades.length;
   for (let i = 0; i < 30 && state.position; i++) state = await command("step");
@@ -28,13 +32,15 @@ test("private trading desk: observed candle → decision → paper fill → cost
   await page.getByRole("button", { name: "Results", exact: true }).click(); await expect(page.getByText("Positive days", { exact: true })).toBeVisible();
   await page.screenshot({ path: ".marketpilot-e2e/desktop.png", fullPage: true });
   const exportResponse = await request.get("/api/marketpilot?mode=REPLAY"); const snapshots = await exportResponse.json();
-  expect(snapshots[0].ruleVersion).toBe("transparent-1.0.0"); expect(snapshots[0].snapshot.candles.length).toBeGreaterThan(0);
+  expect(snapshots[0].ruleVersion).toBe("transparent-1.1.0"); expect(snapshots[0].snapshot.candles.length).toBeGreaterThan(0);
   expect(snapshots[0].snapshot.candles.every((b: {time:string}) => b.time <= snapshots[0].time)).toBeTruthy();
-  await page.getByRole("button", { name: "LIVE", exact: true }).click();
   await expect(page.getByText("CONTRACT UNVERIFIED", { exact: true })).toBeVisible();
   await expect(page.locator(".mp-signal strong")).toHaveText("WAIT");
   await expect(page.locator(".mp-context-item").getByText("UNAVAILABLE", { exact: true })).toHaveCount(3);
   await expect(page.getByRole("heading", { name: "LIVE feed health" })).toBeVisible();
+  await expect(page.getByText("LIVE setup checklist", { exact: true })).toBeVisible();
+  await expect(page.getByText("ANGEL_ACCESS_TOKEN", { exact: true })).toBeVisible();
+  await expect(page.getByText("MARKETPILOT_SESSION_FILE", { exact: true })).toBeVisible();
   await expect(page.getByText("Not configured", { exact: true })).toBeVisible();
   await expect(page.getByText("NOT VERIFIED", { exact: true })).toBeVisible();
   const live = await command("refresh", "LIVE"); expect(live.trades).toHaveLength(0); expect(live.contract).toBeNull();
@@ -67,7 +73,6 @@ test("mobile layout, risk settings and paper-only controls", async ({ page }) =>
   await expect(page.getByRole("dialog")).toHaveCount(0);
   await expect(page.getByText("₹450.00", { exact: true })).toBeVisible();
   await page.screenshot({ path: ".marketpilot-e2e/mobile.png", fullPage: true });
-  await page.getByRole("button", { name: "LIVE", exact: true }).click();
   await expect(page.getByRole("heading", { name: "LIVE feed health" })).toBeVisible();
   await expect(page.getByLabel("Report date · IST")).toBeVisible();
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBeTruthy();

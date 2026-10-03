@@ -80,7 +80,7 @@ export async function quote(contract: Contract): Promise<{ price: number; time: 
   try {
     const response = await fetch("https://apiconnect.angelone.in/rest/secure/angelbroking/market/v1/quote/", {
       method: "POST", signal: AbortSignal.timeout(10000), cache: "no-store",
-      headers: { "Content-Type": "application/json", Authorization: `Bearer ${e.ANGEL_ACCESS_TOKEN}`, "X-PrivateKey": e.ANGEL_API_KEY!, "X-UserType": "USER", "X-SourceID": "WEB", "X-ClientLocalIP": e.ANGEL_CLIENT_LOCAL_IP!, "X-ClientPublicIP": e.ANGEL_CLIENT_PUBLIC_IP!, "X-MACAddress": e.ANGEL_MAC_ADDRESS! },
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${e.ANGEL_ACCESS_TOKEN!.trim().replace(/^Bearer\s+/i, "")}`, "X-PrivateKey": e.ANGEL_API_KEY!, "X-UserType": "USER", "X-SourceID": "WEB", "X-ClientLocalIP": e.ANGEL_CLIENT_LOCAL_IP!, "X-ClientPublicIP": e.ANGEL_CLIENT_PUBLIC_IP!, "X-MACAddress": e.ANGEL_MAC_ADDRESS! },
       body: JSON.stringify({ mode: "FULL", exchangeTokens: { MCX: [contract.token] } }),
     });
     if (!response.ok) throw new QuoteError("UNAVAILABLE");

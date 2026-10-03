@@ -1,5 +1,6 @@
 import { db } from "./storage";
 import { istDay } from "./time";
+import { paperPerformance } from "./performance";
 import type { ContextItem, Contract, Day, Decision, Journal, Position, Settings, Trade } from "./types";
 
 export type ForwardCheckpoint = {
@@ -68,6 +69,7 @@ export function forwardSessionReport(day: string, now = new Date().toISOString()
       generatedAt: now, window, asOfCheckpoint: checkpoint,
       observations, pendingAtStart, decisions, entries, exits, journal,
       assessments: journal.filter(event => event.kind === "ASSESSMENT"),
+      closedPaperPerformance: paperPerformance(exits),
       riskLockouts: journal.filter(event => event.kind === "RISK_LOCKOUT"),
       coverage: { firstReceipt, lastReceipt, validSamples: valid.length, failedSamples: observations.length - valid.length, statusCounts, largestGapSeconds,
         completeMarketCoverage: false, note: "Polling is sampled coverage. Gaps, missing ticks and periods with no worker cannot be reconstructed." },

@@ -4,7 +4,7 @@ import type { Decision, Mode, State } from "./types";
 import type { LiveObservation } from "./feed-types";
 import { liquidationNet } from "./paper";
 // Node 22.13+ built-in SQLite; no external database or native dependency needed.
-interface Statement { run(...params: unknown[]): unknown; get(...params: unknown[]): unknown; all(...params: unknown[]): unknown[] }
+interface Statement { run(...params: unknown[]): { changes: number | bigint }; get(...params: unknown[]): unknown; all(...params: unknown[]): unknown[] }
 interface DB { exec(sql: string): void; prepare(sql: string): Statement }
 type SQLite = { DatabaseSync: new (filename: string) => DB };
 let connection: DB;
@@ -68,12 +68,36 @@ export function saveState(s: State, decision?: Decision) {
     store.exec("COMMIT");
   } catch (error) { store.exec("ROLLBACK"); throw error; }
 }
+export class MonitorBusyError extends Error {
+  constructor() { super("Monitor is busy; retry shortly"); this.name = "MonitorBusyError"; }
+}
+export function sqliteBusy(error: unknown) {
+  const code = (error as { errcode?: unknown } | null)?.errcode;
+  return typeof code === "number" && (code & 255) === 5;
+}
 export async function exclusive<T>(mode: Mode, fn: () => Promise<T>): Promise<T> {
   const owner = crypto.randomUUID(), store = db();
-  store.prepare("INSERT INTO leases VALUES (?,?,?) ON CONFLICT(name) DO UPDATE SET owner=excluded.owner, expires=excluded.expires WHERE leases.expires < ?").run(mode, owner, Date.now() + 120000, Date.now());
-  const lock = store.prepare("SELECT owner FROM leases WHERE name=?").get(mode) as { owner: string };
-  if (lock.owner !== owner) throw new Error("Monitor is busy; retry shortly");
-  try { return await fn(); } finally { store.prepare("DELETE FROM leases WHERE name=? AND owner=?").run(mode, owner); }
+  // Reading an active lease needs no write lock, even while its holder commits.
+  const current = store.prepare("SELECT expires FROM leases WHERE name=?").get(mode) as { expires: number } | undefined;
+  if (current && current.expires >= Date.now()) throw new MonitorBusyError();
+  // A synchronous five-second acquisition wait blocks the entire web process.
+  // Contention before acquiring a lease is safe to retry on the next monitor tick.
+  store.exec("PRAGMA busy_timeout=100");
+  try {
+    const acquired = store.prepare("INSERT INTO leases VALUES (?,?,?) ON CONFLICT(name) DO UPDATE SET owner=excluded.owner, expires=excluded.expires WHERE leases.expires < ?").run(mode, owner, Date.now() + 120000, Date.now());
+    // The atomic write remains authoritative if another process won the race.
+    if (!acquired.changes) throw new MonitorBusyError();
+  } catch (error) {
+    if (sqliteBusy(error)) throw new MonitorBusyError();
+    throw error;
+  } finally { store.exec("PRAGMA busy_timeout=5000"); }
+  try { return await fn(); } finally {
+    try { store.prepare("DELETE FROM leases WHERE name=? AND owner=?").run(mode, owner); }
+    catch (error) {
+      if (error instanceof Error) Object.assign(error, { marketpilotOperation: "lease.release" });
+      throw error;
+    }
+  }
 }
 export function decisions(mode: Mode) { return db().prepare("SELECT json FROM decisions WHERE mode=? ORDER BY rowid DESC LIMIT 500").all(mode).map(r => JSON.parse((r as {json:string}).json)); }
 

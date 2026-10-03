@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { operate } from "@/marketpilot/engine";
+import { operate, refreshDashboard } from "@/marketpilot/engine";
 import { decisions } from "@/marketpilot/storage";
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -8,6 +8,7 @@ const settings = z.object({
 }).partial().strict();
 const input = z.object({ mode: z.enum(["LIVE", "REPLAY"]), command: z.enum(["refresh", "step", "play", "pause-replay", "enter", "exit", "settings", "assess", "worker"]), settings: settings.optional() }).strict();
 export async function POST(request: Request) {
+  let command: string | undefined;
   const origin = request.headers.get("origin");
   // Next's internal URL may use localhost while the browser uses 127.0.0.1.
   // Compare the browser origin to the actual request Host, never to a forwarded arbitrary origin.
@@ -18,8 +19,19 @@ export async function POST(request: Request) {
   }
   try {
     const body = input.parse(await request.json());
-    return Response.json(await operate(body.mode, body.command, body.settings), { headers: { "Cache-Control": "no-store" } });
-  } catch (error) { return Response.json({ error: error instanceof z.ZodError ? "Invalid configuration" : error instanceof Error && /blocked|busy|Close the|fresh quote/.test(error.message) ? error.message : "Monitor request failed; check local setup" }, { status: 400 }); }
+    command = body.command;
+    const result = body.command === "refresh" ? await refreshDashboard(body.mode) : await operate(body.mode, body.command, body.settings);
+    return Response.json(result, { headers: { "Cache-Control": "no-store" } });
+  } catch (error) {
+    // Log only fixed diagnostic fields. Raw errors may contain private paths or broker data.
+    const diagnostic = error as { code?: unknown; errcode?: unknown; marketpilotOperation?: unknown } | null;
+    const calls = error instanceof Error ? (error.stack ?? "").split("\n").slice(1, 5).map(line => line.match(/\bat ([A-Za-z0-9_.$]+)/)?.[1] ?? "anonymous") : [];
+    console.error("MarketPilot monitor request failed", { command, type: error instanceof Error ? error.name : "Unknown", calls,
+      operation: diagnostic?.marketpilotOperation === "lease.release" ? "lease.release" : "request",
+      code: typeof diagnostic?.code === "string" && /^ERR_SQLITE_[A-Z_]+$/.test(diagnostic.code) ? diagnostic.code : "UNCLASSIFIED",
+      sqliteCode: typeof diagnostic?.errcode === "number" ? diagnostic.errcode : null });
+    return Response.json({ error: error instanceof z.ZodError ? "Invalid configuration" : error instanceof Error && /blocked|busy|Close the|fresh quote/.test(error.message) ? error.message : "Monitor request failed; check local setup" }, { status: 400 });
+  }
 }
 export async function GET(request: Request) {
   const mode = new URL(request.url).searchParams.get("mode") === "LIVE" ? "LIVE" : "REPLAY";

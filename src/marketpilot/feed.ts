@@ -3,7 +3,11 @@ import type { Contract, State } from "./types";
 import type { FeedHealth, LiveObservation, ObservationStatus } from "./feed-types";
 import { db, lastValidObservation, observationRows, writeObservation } from "./storage";
 import { istDay } from "./time";
+import { sessionTokenStatus } from "./credentials";
 
+export function missingLiveSettings() {
+  return ["ANGEL_API_KEY", "ANGEL_ACCESS_TOKEN", "ANGEL_CLIENT_LOCAL_IP", "ANGEL_CLIENT_PUBLIC_IP", "ANGEL_MAC_ADDRESS", "MARKETPILOT_SPECS_FILE", "MARKETPILOT_SESSION_FILE", "WTI_CONTEXT_URL", "BRENT_CONTEXT_URL", "OIL_NEWS_URL"].filter(key => !process.env[key]?.trim());
+}
 export function liveConfigured() {
   return ["ANGEL_API_KEY", "ANGEL_ACCESS_TOKEN", "ANGEL_CLIENT_LOCAL_IP", "ANGEL_CLIENT_PUBLIC_IP", "ANGEL_MAC_ADDRESS", "MARKETPILOT_SPECS_FILE"].every(key => !!process.env[key]?.trim());
 }
@@ -73,6 +77,8 @@ export function applyObservation(s: State, o: LiveObservation) {
   s.latestObservation = o;
   s.clock = o.receivedAt ?? o.startedAt;
   if (o.status !== "OK" || !o.contract || o.price === null || !o.exchangeTime) {
+    // Verified contract metadata does not imply an accepted price or connection.
+    if (!s.contract && !s.position && !s.candles.length && o.contract?.verified) s.contract = { ...o.contract };
     s.feed = o.status === "UNAVAILABLE" || o.status === "INTERRUPTED" ? "DISCONNECTED" : o.status;
     return;
   }
@@ -106,7 +112,7 @@ export function feedHealth(s: State, now = new Date().toISOString()): FeedHealth
   const ongoing = Math.max(0, (Date.parse(now) - Date.parse(lastValid?.exchangeTime ?? counts.first ?? now)) / 1000);
   const workerAge = Date.parse(now) - Date.parse(s.lastWorker ?? "");
   const connected = latest?.status === "OK" && age !== null && age <= 30 && sameContract(latest.contract, s.contract);
-  return { configured: liveConfigured(), connection: connected ? "CONNECTED_AND_VERIFIED" : lastValid ? "DISCONNECTED" : "NOT_VERIFIED",
+  return { configured: liveConfigured(), missingSettings: missingLiveSettings(), sessionTokenStatus: sessionTokenStatus(process.env.ANGEL_ACCESS_TOKEN, Date.parse(now)), connection: connected ? "CONNECTED_AND_VERIFIED" : lastValid ? "DISCONNECTED" : "NOT_VERIFIED",
     lastValidExchangeTime: lastValid?.exchangeTime ?? null, lastReceiptTime: latest?.receivedAt ?? null,
     ageSeconds: age, workerStatus: workerAge >= 0 && workerAge <= 30000 ? "RUNNING" : "STOPPED_OR_NOT_STARTED", lastWorker: s.lastWorker,
     validSamples: counts.valid, failedSamples: counts.failed, pendingSamples: counts.pending,

@@ -54,3 +54,5 @@ next-env.d.ts
 .marketpilot-*/
 marketpilot-specs.local.json
 .npm-cache/
+
+marketpilot-sessions.local.json

@@ -1,8 +1,9 @@
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import * as broker from "../src/marketpilot/adapters/smartapi";
 import * as context from "../src/marketpilot/adapters/context";
-import { initial, operate } from "../src/marketpilot/engine";
-import { db, readState, saveState, observationRows, writeObservation } from "../src/marketpilot/storage";
+import * as session from "../src/marketpilot/session";
+import { initial, operate, refreshDashboard } from "../src/marketpilot/engine";
+import { db, readState, saveState, observationRows, writeObservation, exclusive, MonitorBusyError } from "../src/marketpilot/storage";
 import { temporalStatus, feedHealth } from "../src/marketpilot/feed";
 import { forwardSessionReport } from "../src/marketpilot/report";
 import type { Contract, ContextItem } from "../src/marketpilot/types";
@@ -23,6 +24,10 @@ beforeEach(() => {
   vi.spyOn(broker, "currentContract").mockResolvedValue(contract);
   vi.spyOn(broker, "quote").mockImplementation(async () => ({ price: 6064, time: new Date().toISOString() }));
   vi.spyOn(context, "globalContext").mockImplementation(async time => contextFixtures(time, "LIVE"));
+  vi.spyOn(session, "marketSession").mockImplementation(async time => session.reviewSession({
+    source: "https://www.mcxindia.com/test-fixture", verifiedAt: "2026-09-13T00:00:00Z", validUntil: "2026-09-15T18:00:00Z",
+    days: [{ date: "2026-09-14", windows: [{ opensAt: "2026-09-14T09:00:00+05:30", closesAt: "2026-09-14T23:30:00+05:30" }] }],
+  }, time));
 });
 afterEach(() => { vi.restoreAllMocks(); vi.unstubAllEnvs(); vi.useRealTimers(); });
 const samples = () => observationRows("SELECT json FROM live_observations ORDER BY rowid");
@@ -33,6 +38,78 @@ function seedTrend() {
 }
 
 describe("durable LIVE ingestion and paper fills", () => {
+  it("reads the worker's saved decision without polling or duplicating its audit records", async () => {
+    seedTrend();
+    const worker = await operate("LIVE", "worker");
+    const before = readState("LIVE");
+    vi.mocked(broker.quote).mockClear();
+    const dashboards = await Promise.all(Array.from({ length: 10 }, () => refreshDashboard("LIVE")));
+    expect(broker.quote).not.toHaveBeenCalled();
+    expect(dashboards.every(s => s.decision?.id === worker.decision?.id)).toBe(true);
+    expect(dashboards[0].feedHealth?.workerStatus).toBe("RUNNING");
+    expect(samples()).toHaveLength(1);
+    expect(readState("LIVE")).toEqual(before);
+  });
+
+  it("resumes dashboard ingestion when the worker heartbeat expires", async () => {
+    await operate("LIVE", "worker");
+    vi.setSystemTime(Date.parse(now) + 31001);
+    vi.mocked(broker.quote).mockClear();
+    const dashboard = await refreshDashboard("LIVE");
+    expect(broker.quote).toHaveBeenCalledTimes(1);
+    expect(dashboard.latestObservation?.status).toBe("OK");
+    expect(dashboard.feedHealth?.workerStatus).toBe("STOPPED_OR_NOT_STARTED");
+    expect(samples()).toHaveLength(2);
+  });
+
+  it("coalesces concurrent browser polls into one ingestion when no worker is running", async () => {
+    const dashboards = await Promise.all(Array.from({ length: 10 }, () => refreshDashboard("LIVE")));
+    expect(broker.quote).toHaveBeenCalledTimes(1);
+    expect(samples()).toHaveLength(1);
+    expect(dashboards.every(s => s.decision?.id === dashboards[0].decision?.id)).toBe(true);
+  });
+
+  it("allows dashboard reads during an update while keeping paper commands exclusive", async () => {
+    seedTrend();
+    const saved = await operate("LIVE", "refresh");
+    vi.setSystemTime(Date.parse(now) + 31001);
+    vi.mocked(broker.quote).mockClear();
+    await exclusive("LIVE", async () => {
+      const dashboard = await refreshDashboard("LIVE");
+      expect(dashboard.decision?.id).toBe(saved.decision?.id);
+      expect(dashboard.feedHealth?.connection).toBe("DISCONNECTED");
+      await expect(operate("LIVE", "enter")).rejects.toBeInstanceOf(MonitorBusyError);
+    });
+    expect(broker.quote).not.toHaveBeenCalled();
+    expect(samples()).toHaveLength(1);
+    expect(readState("LIVE")?.position).toBeNull();
+    expect(db().prepare("SELECT * FROM leases").all()).toEqual([]);
+  });
+
+  it.each(["WTI", "Brent", "Oil news"])("keeps WAIT when %s is missing despite a valid broker quote and a strong trend", async name => {
+    seedTrend();
+    vi.mocked(context.globalContext).mockImplementation(async time => {
+      const fixtures = contextFixtures(time, "LIVE");
+      fixtures.find(item => item.name === name)!.status = "UNAVAILABLE";
+      return fixtures;
+    });
+    const s = await operate("LIVE", "worker");
+    expect(s.latestObservation?.status).toBe("OK");
+    expect(s.settings.requireContext).toBe(true);
+    expect(s.decision?.action).toBe("WAIT");
+    expect(s.decision?.reasons.join(" ")).toContain("Global confirmation is unavailable");
+    expect(s.context.find(item => item.name === name)?.status).toBe("UNAVAILABLE");
+    expect(s.position).toBeNull();
+  });
+  it("shows reviewed contract metadata after failed authentication without inventing a connection or price", async () => {
+    vi.mocked(broker.quote).mockRejectedValue(new broker.QuoteError("UNAVAILABLE"));
+    const s = await operate("LIVE", "refresh");
+    expect(s.contract).toEqual(contract);
+    expect(s.feed).toBe("DISCONNECTED");
+    expect(s.candles).toHaveLength(0);
+    expect(s.feedHealth?.connection).toBe("NOT_VERIFIED");
+    expect(s.decision?.action).toBe("WAIT");
+  });
   it("records disconnected unconfigured worker sessions and an honest 23:00 assessment", async () => {
     vi.stubEnv("ANGEL_API_KEY", "");
     vi.mocked(context.globalContext).mockResolvedValue(contextFixtures(now, "UNAVAILABLE"));

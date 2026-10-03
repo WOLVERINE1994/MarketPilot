@@ -2,11 +2,13 @@ import { defaults, type Mode, type State, type Settings, type Day } from "./type
 import { loadReplay, observed, replayContext } from "./adapters/replay";
 import { globalContext } from "./adapters/context";
 import { applyObservation, feedHealth, pollLive, validLiveFill } from "./feed";
-import { readState, saveState, exclusive } from "./storage";
+import { readState, saveState, exclusive, MonitorBusyError } from "./storage";
 import { decide } from "./rules";
 import { closePosition, costs, liquidationNet } from "./paper";
 import { fresh, istDay, istMinute } from "./time";
 import { updateLock } from "./risk";
+import { marketSession } from "./session";
+import { paperPerformance } from "./performance";
 import { inApp } from "./notifications";
 export function initial(mode: Mode): State {
   const replay = mode === "REPLAY" ? loadReplay() : null;
@@ -93,8 +95,32 @@ async function live(s: State, worker: boolean) {
   if ((observation.gapSeconds ?? 0) > 30 && observation.status === "OK") journal(s, "FEED_GAP", `Accepted quote after ${observation.gapSeconds!.toFixed(1)} seconds without a valid sample. No missing candles were reconstructed.`);
   s.context = await contexts;
   s.clock = new Date().toISOString();
+  s.session = await marketSession(s.clock);
 }
 export type Command = "refresh" | "step" | "play" | "pause-replay" | "enter" | "exit" | "settings" | "assess" | "worker";
+const dashboardRefreshes = new Map<Mode, Promise<DashboardState>>();
+function savedView(s: State) {
+  if (s.mode === "LIVE") s.feedHealth = feedHealth(s);
+  return view(s);
+}
+export async function refreshDashboard(mode: Mode): Promise<DashboardState> {
+  const saved = readState(mode);
+  const workerAge = Date.now() - Date.parse(saved?.lastWorker ?? "");
+  // The worker owns continuous ingestion. Browser polls only read its committed
+  // state while its heartbeat is current, including during an in-flight tick.
+  if (saved && workerAge >= 0 && workerAge <= 30000) return savedView(saved);
+  const pending = dashboardRefreshes.get(mode);
+  if (pending) return pending;
+  // Preserve dashboard-only monitoring if no worker is running; coalesce tabs.
+  const refresh = operate(mode, "refresh").catch(error => {
+    if (!(error instanceof MonitorBusyError)) throw error;
+    const latest = readState(mode);
+    if (!latest) throw error;
+    return savedView(latest);
+  }).finally(() => dashboardRefreshes.delete(mode));
+  dashboardRefreshes.set(mode, refresh);
+  return refresh;
+}
 export async function operate(mode: Mode, command: Command, settings?: Partial<Settings>) {
   return exclusive(mode, async () => {
     const s = readState(mode) ?? initial(mode);
@@ -132,6 +158,6 @@ export function view(s: State) {
   let running = 0, peak = 0, drawdown = 0;
   for (const t of s.trades) { running += t.net; peak = Math.max(peak, running); drawdown = Math.max(drawdown, peak - running); }
   const daily = s.days.map(d => ({ ...d, net: d.net + (d.closingMark ?? (d === day ? unrealized : 0)) - (d.openingMark ?? 0) }));
-  return { ...s, journal: s.journal.slice(-150).reverse(), unrealized, realized: day.net, equity: day.net + unrealized - (day.openingMark ?? 0), stats: { net: running + unrealized, drawdown: Math.max(drawdown, s.drawdown ?? 0), positive: daily.filter(d => d.net > 0.01).length, flat: daily.filter(d => Math.abs(d.net) <= 0.01).length, negative: daily.filter(d => d.net < -0.01).length, worst: Math.min(0, ...daily.map(d => d.net)) } };
+  return { ...s, journal: s.journal.slice(-150).reverse(), unrealized, realized: day.net, equity: day.net + unrealized - (day.openingMark ?? 0), stats: { performance: paperPerformance(s.trades), net: running + unrealized, drawdown: Math.max(drawdown, s.drawdown ?? 0), positive: daily.filter(d => d.net > 0.01).length, flat: daily.filter(d => Math.abs(d.net) <= 0.01).length, negative: daily.filter(d => d.net < -0.01).length, worst: Math.min(0, ...daily.map(d => d.net)) } };
 }
 export type DashboardState = ReturnType<typeof view>;

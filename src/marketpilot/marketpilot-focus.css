@@ -1,0 +1,8 @@
+.mp-app [hidden]{display:none!important}
+.mp-workspace-nav{display:flex;gap:8px;overflow-x:auto;margin:0 0 20px;padding:4px;border:1px solid var(--mp-line);border-radius:8px;background:#0d1521}
+.mp-workspace-nav button{display:flex;align-items:center;justify-content:center;gap:8px;min-height:38px;padding:8px 14px;border:0;border-radius:5px;background:transparent;color:#91a2b8;font-size:11px;font-weight:600;white-space:nowrap}
+.mp-workspace-nav button:hover{background:#172536;color:#dce8f4}
+.mp-workspace-nav button.selected{background:#1b3932;color:#a5e8d1}
+.mp-market .mp-chart{height:clamp(300px,55vh,620px);max-height:none}
+.mp-focus-exit{width:calc(100% - 40px);margin:0 20px 10px}
+@media(max-width:560px){.mp-workspace-nav{gap:4px;margin-bottom:14px}.mp-workspace-nav button{flex:1;min-height:42px;padding:7px 9px;font-size:9px}.mp-market .mp-chart{height:40vh;min-height:245px}.mp-focus-exit{width:calc(100% - 32px);margin-right:16px;margin-left:16px}}

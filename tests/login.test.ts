@@ -15,15 +15,17 @@ function jwt(exp = Date.now() / 1000 + 3600) {
 beforeEach(async () => { directory = await mkdtemp(join(tmpdir(), "marketpilot-login-")); file = join(directory, ".env.local"); await writeFile(file, content); });
 afterEach(async () => { vi.restoreAllMocks(); vi.unstubAllGlobals(); await rm(directory, { recursive: true, force: true }); });
 
-it("saves the returned JWT only, preserves existing settings and never logs credentials", async () => {
-  const token = jwt(), logger = vi.spyOn(console, "log");
-  const fetcher = vi.fn().mockResolvedValue({ ok: true, json: async () => ({ status: true, data: { jwtToken: `Bearer ${token}`, refreshToken: "DO_NOT_SAVE_REFRESH", feedToken: "DO_NOT_SAVE_FEED" } }) });
+it("saves the client code and required SmartAPI session tokens locally without logging secrets", async () => {
+  const token = jwt(), feedToken = "FEED_TEST_SECRET", logger = vi.spyOn(console, "log");
+  const fetcher = vi.fn().mockResolvedValue({ ok: true, json: async () => ({ status: true, data: { jwtToken: `Bearer ${token}`, refreshToken: "DO_NOT_SAVE_REFRESH", feedToken } }) });
   vi.stubGlobal("fetch", fetcher);
   await loginAndSave(file, credentials);
   const saved = await readFile(file, "utf8"), env = parseEnv(saved);
   expect(env.ANGEL_ACCESS_TOKEN).toBe(token);
-  expect(saved.replace(`ANGEL_ACCESS_TOKEN="${token}"`, 'ANGEL_ACCESS_TOKEN="old-session"')).toBe(content);
-  expect(saved).not.toMatch(/TEST_PIN_ONLY|TESTCLIENT|123456|DO_NOT_SAVE/);
+  expect(env.ANGEL_FEED_TOKEN).toBe(feedToken);
+  expect(env.ANGEL_CLIENT_CODE).toBe(credentials.clientcode);
+  expect(saved).toContain('MARKETPILOT_DATA_DIR="unchanged-directory"');
+  expect(saved).not.toMatch(/TEST_PIN_ONLY|123456|DO_NOT_SAVE/);
   expect(logger).not.toHaveBeenCalled();
   expect(await readdir(directory)).toEqual([".env.local"]);
   expect(fetcher.mock.calls[0][0]).toBe("https://apiconnect.angelone.in/rest/auth/angelbroking/user/v1/loginByPassword");
@@ -33,7 +35,7 @@ it("saves the returned JWT only, preserves existing settings and never logs cred
 
 it.each(["rejected", "network", "malformed", "expired"])("leaves the existing token untouched on %s failure and sanitizes errors", async failure => {
   const fetcher = failure === "network" ? vi.fn().mockRejectedValue(new Error("SECRET_RAW_RESPONSE")) :
-    vi.fn().mockResolvedValue({ ok: true, json: async () => failure === "rejected" ? { status: false, message: "SECRET_RAW_RESPONSE" } : { status: true, data: { jwtToken: failure === "expired" ? jwt(1) : "SECRET_RAW_RESPONSE" } } });
+    vi.fn().mockResolvedValue({ ok: true, json: async () => failure === "rejected" ? { status: false, message: "SECRET_RAW_RESPONSE" } : { status: true, data: { jwtToken: failure === "expired" ? jwt(1) : "SECRET_RAW_RESPONSE", feedToken: "FEED_TEST_SECRET" } } });
   vi.stubGlobal("fetch", fetcher);
   await expect(loginAndSave(file, credentials)).rejects.toThrow("The saved token was not changed");
   expect(await readFile(file, "utf8")).toBe(content);
@@ -52,7 +54,7 @@ it("refuses invalid local inputs or incomplete configuration without sending a l
 it("preserves unrelated edits made while login is in flight", async () => {
   vi.stubGlobal("fetch", vi.fn().mockImplementation(async () => {
     await writeFile(file, content + 'UNRELATED="new-value"\r\n');
-    return { ok: true, json: async () => ({ status: true, data: { jwtToken: jwt() } }) };
+    return { ok: true, json: async () => ({ status: true, data: { jwtToken: jwt(), feedToken: "FEED_TEST_SECRET" } }) };
   }));
   await loginAndSave(file, credentials);
   expect(parseEnv(await readFile(file, "utf8")).UNRELATED).toBe("new-value");
@@ -62,7 +64,7 @@ it("does not overwrite a token changed locally during the request", async () => 
   const changed = content.replace("old-session", "other-session");
   vi.stubGlobal("fetch", vi.fn().mockImplementation(async () => {
     await writeFile(file, changed);
-    return { ok: true, json: async () => ({ status: true, data: { jwtToken: jwt() } }) };
+    return { ok: true, json: async () => ({ status: true, data: { jwtToken: jwt(), feedToken: "FEED_TEST_SECRET" } }) };
   }));
   await expect(loginAndSave(file, credentials)).rejects.toThrow("configuration changed");
   expect(await readFile(file, "utf8")).toBe(changed);

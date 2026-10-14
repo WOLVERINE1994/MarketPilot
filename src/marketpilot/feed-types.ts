@@ -12,9 +12,11 @@ export type LiveObservation = {
   status: ObservationStatus;
   reason: string;
   source: "worker" | "dashboard";
+  transport?: FeedHealth["transport"];
   gapSeconds: number | null;
 };
 export type FeedHealth = {
+  transport: "SMARTAPI_WEBSOCKET" | "REST_FALLBACK" | "WAITING_FOR_STREAM";
   configured: boolean;
   missingSettings: string[];
   sessionTokenStatus: SessionTokenStatus;

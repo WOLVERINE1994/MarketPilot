@@ -41,7 +41,7 @@ async function main() {
   const totp = await hiddenPrompt("Current 6-digit authenticator code");
   console.log("Authenticating with Angel One...");
   await loginAndSave(envFile, { clientcode, password, totp });
-  console.log("Login succeeded. ANGEL_ACCESS_TOKEN saved to .env.local. JWT, PIN/password and authenticator code were not printed; only the JWT was saved.");
+  console.log("Login succeeded. SmartAPI client code and session tokens saved to .env.local. JWT, feed token, PIN/password and authenticator code were not printed.");
   console.log("Restart MarketPilot and its worker, then run: npm.cmd run marketpilot:check");
 }
 main().catch(error => {

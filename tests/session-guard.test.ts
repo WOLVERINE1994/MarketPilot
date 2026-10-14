@@ -52,6 +52,11 @@ describe("decision states and setup privacy", () => {
     expect(decide(s, 0).action).toBe("WAIT");
     expect(decide(s, 0).reasons.join(" ")).toContain("session unverified");
   });
+  it("initializes a default LIVE session descriptor instead of leaving it undefined", () => {
+    const s = initial("LIVE");
+    expect(s.session).toMatchObject({ status: "UNVERIFIED", entriesAllowed: false });
+    expect(() => s.session.reason).not.toThrow();
+  });
   it("requires a protective EXIT during session closure while retaining the stop", () => {
     const s = trend(); evaluate(s); enter(s); const stop = s.position!.stop;
     s.mode = "LIVE"; s.session = reviewSession(calendar, "2026-09-14T23:25:00+05:30");

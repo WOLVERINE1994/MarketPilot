@@ -6,12 +6,13 @@ import { initial, operate, refreshDashboard } from "../src/marketpilot/engine";
 import { db, readState, saveState, observationRows, writeObservation, exclusive, MonitorBusyError } from "../src/marketpilot/storage";
 import { temporalStatus, feedHealth } from "../src/marketpilot/feed";
 import { forwardSessionReport } from "../src/marketpilot/report";
+import { smartMarketStream } from "../src/marketpilot/adapters/smart-stream";
 import type { Contract, ContextItem } from "../src/marketpilot/types";
 import type { LiveObservation } from "../src/marketpilot/feed-types";
 
 const now = "2026-09-14T17:30:00.000Z";
 const contract: Contract = { symbol: "CRUDEOILM21SEP26FUT", token: "12345", expiry: "2026-09-21", lotSize: 10, multiplier: 10, tickSize: 1, source: "https://www.mcxindia.com/test-fixture", verified: true };
-const credentials = ["ANGEL_API_KEY", "ANGEL_ACCESS_TOKEN", "ANGEL_CLIENT_LOCAL_IP", "ANGEL_CLIENT_PUBLIC_IP", "ANGEL_MAC_ADDRESS", "MARKETPILOT_SPECS_FILE"];
+const credentials = ["ANGEL_API_KEY", "ANGEL_CLIENT_CODE", "ANGEL_ACCESS_TOKEN", "ANGEL_FEED_TOKEN", "ANGEL_CLIENT_LOCAL_IP", "ANGEL_CLIENT_PUBLIC_IP", "ANGEL_MAC_ADDRESS", "MARKETPILOT_SPECS_FILE"];
 function contextFixtures(time: string, status: ContextItem["status"]): [ContextItem, ContextItem, ContextItem] {
   const item = (name: string): ContextItem => ({ name, status, source: "MOCK TEST ONLY", time, bias: "NEUTRAL", block: false });
   return [item("WTI"), item("Brent"), item("Oil news")];
@@ -38,6 +39,17 @@ function seedTrend() {
 }
 
 describe("durable LIVE ingestion and paper fills", () => {
+  it("persists whether an accepted worker quote came from WebSocket or REST", async () => {
+    seedTrend();
+    vi.spyOn(smartMarketStream, "latest").mockReturnValue({ token: contract.token, price: 6064, time: now, receivedAt: now });
+    vi.mocked(broker.quote).mockClear();
+    const state = await operate("LIVE", "worker");
+    expect(broker.quote).not.toHaveBeenCalled();
+    expect(state.latestObservation?.transport).toBe("SMARTAPI_WEBSOCKET");
+    expect(state.feedHealth?.transport).toBe("SMARTAPI_WEBSOCKET");
+    expect(readState("LIVE")?.feedHealth?.transport).toBe("SMARTAPI_WEBSOCKET");
+  });
+
   it("reads the worker's saved decision without polling or duplicating its audit records", async () => {
     seedTrend();
     const worker = await operate("LIVE", "worker");

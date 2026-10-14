@@ -1,8 +1,32 @@
 import { readFile } from "node:fs/promises";
 import { resolveContract, type Instrument, type Specification } from "../contracts";
 import type { Contract } from "../types";
+import { lastValidObservation } from "../storage";
+import { istDay } from "../time";
 const MASTER = "https://margincalculator.angelone.in/OpenAPI_File/files/OpenAPIScripMaster.json";
+const MASTER_REFRESH_MS = 3600000;
+const MASTER_RETRY_MS = 60000;
+const MASTER_TIMEOUT_MS = 180000;
 let cache: { rows: Instrument[]; time: number } | null = null;
+let retryAfter = 0;
+export async function instrumentMaster(): Promise<Instrument[]> {
+  const now = Date.now();
+  if (cache && now - cache.time <= MASTER_REFRESH_MS) return cache.rows;
+  if (now < retryAfter) throw new QuoteError("UNAVAILABLE");
+  try {
+    const response = await fetch(MASTER, { cache: "no-store", signal: AbortSignal.timeout(MASTER_TIMEOUT_MS) });
+    if (!response.ok) throw new QuoteError("UNAVAILABLE");
+    const rows: unknown = await response.json();
+    if (!Array.isArray(rows) || rows.some(row => !isRecord(row))) throw new QuoteError("UNAVAILABLE");
+    cache = { rows: rows as Instrument[], time: Date.now() };
+    retryAfter = 0;
+    return cache.rows;
+  } catch (error) {
+    retryAfter = Date.now() + MASTER_RETRY_MS;
+    if (error instanceof QuoteError) throw error;
+    throw new QuoteError("UNAVAILABLE");
+  }
+}
 
 export class QuoteError extends Error {
   constructor(public readonly status: "MALFORMED" | "CONTRACT_MISMATCH" | "UNAVAILABLE", public readonly exchangeTime: string | null = null) {
@@ -12,25 +36,41 @@ export class QuoteError extends Error {
 }
 
 export async function currentContract(now: string, heldSymbol?: string): Promise<Contract> {
+  if (!process.env.MARKETPILOT_SPECS_FILE) throw new QuoteError("UNAVAILABLE");
+  let specs: Specification[];
   try {
-    if (!process.env.MARKETPILOT_SPECS_FILE) throw new QuoteError("UNAVAILABLE");
-    if (!cache || Date.now() - cache.time > 3600000) {
-      const response = await fetch(MASTER, { cache: "no-store", signal: AbortSignal.timeout(10000) });
-      if (!response.ok) throw new QuoteError("UNAVAILABLE");
-      const rows: unknown = await response.json();
-      if (!Array.isArray(rows) || rows.some(row => !isRecord(row))) throw new QuoteError("UNAVAILABLE");
-      cache = { rows: rows as Instrument[], time: Date.now() };
-    }
     // Re-read the local review for every attempt. Expired or withdrawn
     // attestations must also invalidate a previously opened paper position.
-    const specs: Specification[] = JSON.parse(await readFile(process.env.MARKETPILOT_SPECS_FILE, "utf8"));
+    specs = JSON.parse(await readFile(process.env.MARKETPILOT_SPECS_FILE, "utf8"));
     if (!Array.isArray(specs) || specs.some(spec => !isRecord(spec))) throw new QuoteError("UNAVAILABLE");
-    return resolveContract(cache.rows, specs, now, heldSymbol);
   } catch {
     // Filesystem paths, broker response messages and transport errors stay out
     // of the durable audit log and the dashboard.
     throw new QuoteError("UNAVAILABLE");
   }
+  let rows: Instrument[];
+  try { rows = await instrumentMaster(); }
+  catch {
+    // If today's already accepted quote proved the broker token against the
+    // official master, preserve that identity across a temporary master outage.
+    // The current reviewed MCX specification must still attest every monetary
+    // field, and a separate fresh quote is still required before fills.
+    const previous = lastValidObservation();
+    const known = previous?.contract;
+    const sourceTime = previous?.exchangeTime;
+    const age = sourceTime ? Date.parse(now) - Date.parse(sourceTime) : Infinity;
+    if (!known?.verified || !sourceTime || !Number.isFinite(age) || age < 0 || age > 12 * 60 * 60 * 1000 || istDay(sourceTime) !== istDay(now)) throw new QuoteError("UNAVAILABLE");
+    const expiry = known.expiry;
+    const spec = specs.find(item => item.symbol === known.symbol && item.expiry === expiry);
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(expiry) || !Number.isFinite(Date.parse(`${expiry}T00:00:00Z`)) ||
+      (heldSymbol && known.symbol !== heldSymbol) || (!heldSymbol && expiry <= istDay(now)) ||
+      !spec || !/^https:\/\/(www\.)?mcxindia\.com\//.test(spec.source) ||
+      Date.parse(spec.verifiedAt) > Date.parse(now) || !(Date.parse(spec.validUntil) > Date.parse(now)) ||
+      spec.lotSize !== known.lotSize || spec.multiplier !== known.multiplier || spec.tickSize !== known.tickSize || !/^\d+$/.test(known.token)) throw new QuoteError("UNAVAILABLE");
+    return { ...known, source: spec.source, verified: true };
+  }
+  try { return resolveContract(rows, specs, now, heldSymbol); }
+  catch { throw new QuoteError("UNAVAILABLE"); }
 }
 
 export function exchangeTime(value: string): string {
@@ -75,18 +115,24 @@ export function parseQuote(body: unknown, contract: Contract): { price: number; 
 
 export async function quote(contract: Contract): Promise<{ price: number; time: string }> {
   verifyContract(contract);
+  return parseQuote(await marketQuotes([contract.token]), contract);
+}
+
+// Quotes only. There is deliberately no broker order API in this application.
+export async function marketQuotes(tokens: string[], timeoutMs = 10000): Promise<unknown> {
+  if (!tokens.length || tokens.length > 3 || tokens.some(token => !/^\d+$/.test(token)) || new Set(tokens).size !== tokens.length) throw new QuoteError("CONTRACT_MISMATCH");
   const e = process.env;
   if (![e.ANGEL_API_KEY, e.ANGEL_ACCESS_TOKEN, e.ANGEL_CLIENT_LOCAL_IP, e.ANGEL_CLIENT_PUBLIC_IP, e.ANGEL_MAC_ADDRESS].every(Boolean)) throw new QuoteError("UNAVAILABLE");
   try {
     const response = await fetch("https://apiconnect.angelone.in/rest/secure/angelbroking/market/v1/quote/", {
-      method: "POST", signal: AbortSignal.timeout(10000), cache: "no-store",
+      method: "POST", signal: AbortSignal.timeout(timeoutMs), cache: "no-store",
       headers: { "Content-Type": "application/json", Authorization: `Bearer ${e.ANGEL_ACCESS_TOKEN!.trim().replace(/^Bearer\s+/i, "")}`, "X-PrivateKey": e.ANGEL_API_KEY!, "X-UserType": "USER", "X-SourceID": "WEB", "X-ClientLocalIP": e.ANGEL_CLIENT_LOCAL_IP!, "X-ClientPublicIP": e.ANGEL_CLIENT_PUBLIC_IP!, "X-MACAddress": e.ANGEL_MAC_ADDRESS! },
-      body: JSON.stringify({ mode: "FULL", exchangeTokens: { MCX: [contract.token] } }),
+      body: JSON.stringify({ mode: "FULL", exchangeTokens: { MCX: tokens } }),
     });
     if (!response.ok) throw new QuoteError("UNAVAILABLE");
     let body: unknown;
     try { body = await response.json(); } catch { throw new QuoteError("MALFORMED"); }
-    return parseQuote(body, contract);
+    return body;
   } catch (error) {
     if (error instanceof QuoteError) throw error;
     throw new QuoteError("UNAVAILABLE");

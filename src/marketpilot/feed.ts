@@ -1,15 +1,20 @@
-import { currentContract, quote, QuoteError } from "./adapters/smartapi";
+﻿import { currentContract, quote, QuoteError } from "./adapters/smartapi";
 import type { Contract, State } from "./types";
 import type { FeedHealth, LiveObservation, ObservationStatus } from "./feed-types";
 import { db, lastValidObservation, observationRows, writeObservation } from "./storage";
 import { istDay } from "./time";
 import { sessionTokenStatus } from "./credentials";
+import { smartMarketStream } from "./adapters/smart-stream";
 
 export function missingLiveSettings() {
-  return ["ANGEL_API_KEY", "ANGEL_ACCESS_TOKEN", "ANGEL_CLIENT_LOCAL_IP", "ANGEL_CLIENT_PUBLIC_IP", "ANGEL_MAC_ADDRESS", "MARKETPILOT_SPECS_FILE", "MARKETPILOT_SESSION_FILE", "WTI_CONTEXT_URL", "BRENT_CONTEXT_URL", "OIL_NEWS_URL"].filter(key => !process.env[key]?.trim());
+  const missing = ["ANGEL_API_KEY", "ANGEL_CLIENT_CODE", "ANGEL_ACCESS_TOKEN", "ANGEL_FEED_TOKEN", "ANGEL_CLIENT_LOCAL_IP", "ANGEL_CLIENT_PUBLIC_IP", "ANGEL_MAC_ADDRESS", "MARKETPILOT_SPECS_FILE", "MARKETPILOT_SESSION_FILE"].filter(key => !process.env[key]?.trim());
+  const hasOilApi = !!process.env.TWELVE_DATA_API_KEY?.trim() || !!process.env.OILPRICEAPI_KEY?.trim();
+  if (!hasOilApi && !process.env.WTI_CONTEXT_URL?.trim()) missing.push("WTI_CONTEXT_URL");
+  if (!hasOilApi && !process.env.BRENT_CONTEXT_URL?.trim()) missing.push("BRENT_CONTEXT_URL");
+  return missing;
 }
 export function liveConfigured() {
-  return ["ANGEL_API_KEY", "ANGEL_ACCESS_TOKEN", "ANGEL_CLIENT_LOCAL_IP", "ANGEL_CLIENT_PUBLIC_IP", "ANGEL_MAC_ADDRESS", "MARKETPILOT_SPECS_FILE"].every(key => !!process.env[key]?.trim());
+  return ["ANGEL_API_KEY", "ANGEL_CLIENT_CODE", "ANGEL_ACCESS_TOKEN", "ANGEL_FEED_TOKEN", "ANGEL_CLIENT_LOCAL_IP", "ANGEL_CLIENT_PUBLIC_IP", "ANGEL_MAC_ADDRESS", "MARKETPILOT_SPECS_FILE"].every(key => !!process.env[key]?.trim());
 }
 export function sameContract(a: Contract | null, b: Contract | null) {
   return !!a && !!b && a.symbol === b.symbol && a.token === b.token && a.expiry === b.expiry && a.lotSize === b.lotSize && a.multiplier === b.multiplier && a.tickSize === b.tickSize && a.verified && b.verified;
@@ -35,6 +40,7 @@ const reasons: Record<ObservationStatus, string> = {
   UNAVAILABLE: "Broker session, verified contract, or quote endpoint unavailable",
   INTERRUPTED: "Previous attempt did not complete; process stopped before an accepted response",
 };
+let lastRestFallbackAt = 0;
 
 // Called under the durable LIVE lease. Persist the attempt before any network I/O.
 export async function pollLive(s: State, source: LiveObservation["source"]): Promise<LiveObservation> {
@@ -43,16 +49,28 @@ export async function pollLive(s: State, source: LiveObservation["source"]): Pro
     writeObservation({ ...pending, status: "INTERRUPTED", reason: reasons.INTERRUPTED });
   }
   const o: LiveObservation = { id: crypto.randomUUID(), startedAt, receivedAt: null, exchangeTime: null,
-    contract: null, price: null, status: "PENDING", reason: reasons.PENDING, source, gapSeconds: null };
+    contract: null, price: null, status: "PENDING", reason: reasons.PENDING, source, transport: "WAITING_FOR_STREAM", gapSeconds: null };
   writeObservation(o);
   try {
     if (!liveConfigured()) throw new QuoteError("UNAVAILABLE");
-    const contract = await currentContract(startedAt, s.position?.contract.symbol);
+    const contract = await currentContract(startedAt, s.position?.contract.instrument === "OPTION" ? s.position.contract.underlyingSymbol : s.position?.contract.symbol);
     o.contract = contract;
     // Record the exact resolved request identity before submitting the quote request.
     writeObservation(o);
-    if (s.position && !sameContract(contract, s.position.contract)) throw new QuoteError("CONTRACT_MISMATCH");
-    const q = await quote(contract);
+    if (s.position && s.position.contract.instrument !== "OPTION" && !sameContract(contract, s.position.contract)) throw new QuoteError("CONTRACT_MISMATCH");
+    let q: { price: number; time: string };
+    const streamed = source === "worker" ? smartMarketStream.latest(contract.token) : null;
+    const previousQuote = lastValidObservation(contract.symbol, contract.token);
+    const streamAge = streamed ? Date.now() - Date.parse(streamed.time) : Infinity;
+    if (streamed && streamAge >= 0 && streamAge <= 30000 && streamed.time !== previousQuote?.exchangeTime) {
+      q = { price: streamed.price, time: streamed.time };
+      o.transport = "SMARTAPI_WEBSOCKET";
+    } else {
+      if (source === "worker" && smartMarketStream.running && Date.now() - lastRestFallbackAt < 5000) throw new QuoteError("UNAVAILABLE");
+      lastRestFallbackAt = Date.now();
+      o.transport = "REST_FALLBACK";
+      q = await quote(contract);
+    }
     o.receivedAt = new Date().toISOString();
     o.exchangeTime = q.time;
     if (!Number.isFinite(q.price) || q.price <= 0) o.status = "MALFORMED";
@@ -72,7 +90,6 @@ export async function pollLive(s: State, source: LiveObservation["source"]): Pro
   writeObservation(o);
   return o;
 }
-
 export function applyObservation(s: State, o: LiveObservation) {
   s.latestObservation = o;
   s.clock = o.receivedAt ?? o.startedAt;
@@ -97,7 +114,8 @@ export function validLiveFill(s: State) {
   const age = Date.parse(s.clock) - Date.parse(o?.exchangeTime ?? "");
   return !!o && o.status === "OK" && o.price !== null && Number.isFinite(o.price) && o.price > 0 &&
     age >= 0 && age <= 30000 && s.feed === "CONNECTED" && s.feedTime === o.exchangeTime &&
-    s.candles.at(-1)?.close === o.price && sameContract(o.contract, s.position?.contract ?? s.contract);
+    s.candles.at(-1)?.close === o.price && sameContract(o.contract, s.position?.contract.instrument === "OPTION" ? s.contract : s.position?.contract ?? s.contract) &&
+    (!s.position || s.position.contract.instrument !== "OPTION" || s.position.contract.underlyingSymbol === o.contract?.symbol);
 }
 
 export function feedHealth(s: State, now = new Date().toISOString()): FeedHealth {
@@ -108,11 +126,14 @@ export function feedHealth(s: State, now = new Date().toISOString()): FeedHealth
     MIN(started_at) AS first FROM live_observations WHERE COALESCE(received_at,started_at)>=? AND COALESCE(received_at,started_at)<?`).get(start, end) as {valid:number;failed:number;pending:number;gap:number;first:string|null};
   const lastValid = lastValidObservation();
   const latest = observationRows("SELECT json FROM live_observations ORDER BY rowid DESC LIMIT 1")[0];
+  const transport: FeedHealth["transport"] = latest?.status === "OK"
+    ? latest.transport ?? "REST_FALLBACK"
+    : "WAITING_FOR_STREAM";
   const age = lastValid?.exchangeTime ? Math.max(0, (Date.parse(now) - Date.parse(lastValid.exchangeTime)) / 1000) : null;
   const ongoing = Math.max(0, (Date.parse(now) - Date.parse(lastValid?.exchangeTime ?? counts.first ?? now)) / 1000);
   const workerAge = Date.parse(now) - Date.parse(s.lastWorker ?? "");
   const connected = latest?.status === "OK" && age !== null && age <= 30 && sameContract(latest.contract, s.contract);
-  return { configured: liveConfigured(), missingSettings: missingLiveSettings(), sessionTokenStatus: sessionTokenStatus(process.env.ANGEL_ACCESS_TOKEN, Date.parse(now)), connection: connected ? "CONNECTED_AND_VERIFIED" : lastValid ? "DISCONNECTED" : "NOT_VERIFIED",
+  return { transport, configured: liveConfigured(), missingSettings: missingLiveSettings(), sessionTokenStatus: sessionTokenStatus(process.env.ANGEL_ACCESS_TOKEN, Date.parse(now)), connection: connected ? "CONNECTED_AND_VERIFIED" : lastValid ? "DISCONNECTED" : "NOT_VERIFIED",
     lastValidExchangeTime: lastValid?.exchangeTime ?? null, lastReceiptTime: latest?.receivedAt ?? null,
     ageSeconds: age, workerStatus: workerAge >= 0 && workerAge <= 30000 ? "RUNNING" : "STOPPED_OR_NOT_STARTED", lastWorker: s.lastWorker,
     validSamples: counts.valid, failedSamples: counts.failed, pendingSamples: counts.pending,

@@ -10,11 +10,12 @@ import { updateLock } from "./risk";
 import { marketSession } from "./session";
 import { paperPerformance } from "./performance";
 import { inApp } from "./notifications";
+import { decideHeldOption, hasNewOptionStreamQuote, heldOptionQuote, optionFillReady, pollOptions, suggestOptions } from "./options";
 export function initial(mode: Mode): State {
   const replay = mode === "REPLAY" ? loadReplay() : null;
   const candles = replay ? observed(replay, 32) : [];
   const clock = candles.at(-1)?.time ?? new Date().toISOString();
-  return { mode, cursor: candles.length, running: false, clock, contract: replay?.contract ?? null, candles, feed: replay ? "CONNECTED" : "DISCONNECTED", feedTime: replay ? clock : null, lastWorker: null, context: replay ? replayContext(clock) : [], settings: { ...defaults }, position: null, trades: [], days: [{ day: istDay(clock), net: 0, peak: 0, trades: 0, locked: false }], decision: null, journal: [], assessment: null, lastAlert: "", lastEntryBar: null };
+  return { mode, cursor: candles.length, running: false, clock, contract: replay?.contract ?? null, candles, feed: replay ? "CONNECTED" : "DISCONNECTED", feedTime: replay ? clock : null, lastWorker: null, context: replay ? replayContext(clock) : [], settings: { ...defaults }, position: null, trades: [], days: [{ day: istDay(clock), net: 0, peak: 0, trades: 0, locked: false }], decision: null, journal: [], assessment: null, lastAlert: "", lastEntryBar: null, session: { day: istDay(clock), status: "UNVERIFIED", entriesAllowed: false, reason: "MCX session unverified; new entries blocked", source: null, opensAt: null, closesAt: null } };
 }
 function journal(s: State, kind: string, text: string) { s.journal.push({ id: crypto.randomUUID(), time: s.clock, kind, text }); }
 function lock(s: State, equity: number) {
@@ -22,8 +23,8 @@ function lock(s: State, equity: number) {
   updateLock(day, equity, s.settings);
   if (!wasLocked && day.locked) journal(s, "RISK_LOCKOUT", `Daily loss/profit-protection lockout latched at estimated equity INR ${equity.toFixed(2)}; peak INR ${day.peak.toFixed(2)}. No new entries until next IST day.`);
 }
-function canFill(s: State) { return s.mode === "LIVE" ? validLiveFill(s) : fresh(s.feedTime, s.clock) && ["CONNECTED", "REPLAY ENDED"].includes(s.feed); }
-export function mark(s: State) { return liquidationNet(s.position, s.candles.at(-1)?.close ?? 0, s.clock); }
+function canFill(s: State) { return s.position?.contract.instrument === "OPTION" ? optionFillReady(s) : s.mode === "LIVE" ? validLiveFill(s) : fresh(s.feedTime, s.clock) && ["CONNECTED", "REPLAY ENDED"].includes(s.feed); }
+export function mark(s: State) { return liquidationNet(s.position, s.candles.at(-1)?.close ?? 0, s.clock, heldOptionQuote(s)); }
 export function currentDay(s: State): Day {
   let day = s.days.at(-1)!;
   if (day.day !== istDay(s.clock)) {
@@ -41,7 +42,7 @@ export function assess(s: State, manual = false) {
   const feedReady = canFill(s);
   const contextReady = ["WTI", "Brent", "Oil news"].every(name => {
     const c = s.context.find(item => item.name === name);
-    return c && c.status !== "UNAVAILABLE" && (s.mode === "REPLAY" || c.status === "LIVE") && fresh(c.time, s.clock, 900);
+    return c && c.status !== "UNAVAILABLE" && (s.mode === "REPLAY" || c.status === "LIVE") && fresh(c.time, s.clock, c.freshnessSeconds ?? 900);
   });
   const conclusion = feedReady && contextReady ? (d?.reasons.join(". ") ?? "Awaiting decision") : "Market conclusion unavailable: feed or global context is missing, stale or unverified. Current state is a safety/risk status, not a market forecast.";
   s.assessment = { day: istDay(s.clock), time: s.clock, text: `${manual ? "On-demand" : "Scheduled " + s.settings.assessmentTime + " IST"} assessment · ${d?.action ?? "WAIT"}. Data: ${s.feed}; observation ${s.latestObservation?.status ?? (s.mode === "REPLAY" ? "SYNTHETIC" : "NONE")}; last valid exchange ${s.feedTime ?? "UNAVAILABLE"}; ${feedReady ? "fresh" : "UNAVAILABLE for fills"}. ${conclusion}. Global: ${s.context.map(c => `${c.name} ${c.status}${c.status === "UNAVAILABLE" ? "" : "/" + c.bias}`).join(", ") || "UNAVAILABLE"}. ${s.position ? `Open ${s.position.side}; stop ${s.position.stop}; planned risk ₹${s.position.maxRisk.toFixed(2)}. ${feedReady ? "Marked P&L remains an estimate" : "Current liquidation value unknown; exit must await valid data"}` : "No open position"}. No outcome or positive close is guaranteed.` };
@@ -51,7 +52,8 @@ export function evaluate(s: State) {
   const day = currentDay(s), equity = day.net + mark(s) - (day.openingMark ?? 0);
   lock(s, equity);
   if (s.mode === "LIVE" && !validLiveFill(s) && s.feed === "CONNECTED") s.feed = "UNVERIFIED";
-  const d = decide(s, equity); s.decision = d;
+  const d = s.position?.contract.instrument === "OPTION" ? decideHeldOption(s, equity) : decide(s, equity); s.decision = d;
+  if (s.mode === "LIVE" && s.optionDesk) { s.optionDesk.suggestions = suggestOptions(s, equity); d.snapshot.options = structuredClone(s.optionDesk.suggestions); }
   if (s.mode === "LIVE") {
     d.snapshot.observationId = s.latestObservation?.id ?? null;
     d.snapshot.dataStatus = s.latestObservation?.status ?? "NO_SAMPLES";
@@ -65,7 +67,7 @@ export function evaluate(s: State) {
     let price = bar.close;
     if (d.reasons[0].startsWith("Protective stop")) price = s.mode === "LIVE" ? bar.close : p.side === "BUY" ? Math.min(p.stop, bar.open) : Math.max(p.stop, bar.open);
     else if (s.mode === "REPLAY" && d.reasons[0].startsWith("Planned 2R")) price = p.target;
-    const trade = closePosition(p, price, s.clock, d.reasons.join("; "));
+    const trade = closePosition(p, price, s.clock, d.reasons.join("; "), heldOptionQuote(s));
     s.trades.push(trade); day.net += trade.net; s.position = null; s.pendingExitReason = undefined; s.lastEntryBar = bar.time;
     journal(s, "EXIT", `${p.side} ${p.contract.symbol} · fill ₹${trade.exit.toFixed(2)} · charges ₹${trade.costs.toFixed(2)} · net ₹${trade.net.toFixed(2)} · ${trade.reason}`);
     lock(s, day.net - (day.openingMark ?? 0));
@@ -79,11 +81,36 @@ export function evaluate(s: State) {
 }
 export function enter(s: State) {
   const d = s.decision ?? evaluate(s);
-  if (!canFill(s) || s.position || !["BUY", "SELL"].includes(d.action) || !d.entry || !d.stop || !d.target || !s.contract || !(d.maxRisk > 0)) throw new Error("Entry blocked by current signal, feed, or risk rules");
+  if (!canFill(s) || s.position || !["BUY", "SELL"].includes(d.action) || !d.entry || !d.stop || !d.target || !s.contract || !(d.maxRisk > 0)) {
+    const blockers = [...d.reasons];
+    if (!canFill(s)) blockers.unshift("A fresh verified quote and contract are required");
+    if (s.position) blockers.unshift("A paper position is already open");
+    if (!["BUY", "SELL"].includes(d.action)) blockers.unshift(`Current recommendation is ${d.action}, not BUY or SELL`);
+    if (!d.entry || !d.stop || !d.target || !(d.maxRisk > 0)) blockers.push("A complete entry, stop, target, and positive risk estimate are unavailable");
+    if (!s.contract) blockers.push("The active contract is unverified");
+    throw new Error(`Paper entry blocked: ${[...new Set(blockers)].join("; ")}`);
+  }
   s.position = { side: d.action as "BUY" | "SELL", entry: d.entry, stop: d.stop, target: d.target, time: s.clock, contract: { ...s.contract }, entryCosts: costs(d.entry, s.contract.multiplier, s.settings), maxRisk: d.maxRisk, settings: { ...s.settings } };
   currentDay(s).trades++; s.lastEntryBar = s.candles.at(-1)!.time;
   journal(s, "ENTRY", `Paper ${d.action} · ${s.contract.symbol} · fixed 1 lot · fill ₹${d.entry.toFixed(2)} · stop ₹${d.stop.toFixed(2)} · planned loss ₹${d.maxRisk.toFixed(2)} including estimated costs`);
   return d;
+}
+export function enterOption(s: State, type: "CE" | "PE") {
+  const suggestion = suggestOptions(s, currentDay(s).net + mark(s) - (currentDay(s).openingMark ?? 0)).find(item => item.type === type);
+  const track = suggestion?.contract ? s.optionDesk?.tracks[suggestion.contract.token] : null;
+  if (s.mode !== "LIVE" || s.position || suggestion?.action !== "BUY" || !suggestion.contract || !suggestion.quote || !suggestion.entry || !suggestion.stop || !suggestion.target || track?.status !== "OK") {
+    const blockers: string[] = [];
+    if (s.mode !== "LIVE") blockers.push("Live market data is required");
+    if (s.position) blockers.push("A paper position is already open; the shared position limit is one");
+    if (suggestion?.action !== "BUY") blockers.push(`${type} recommendation is ${suggestion?.action ?? "unavailable"}`, ...(suggestion?.reasons ?? []));
+    if (!suggestion?.contract || !suggestion.quote || !suggestion.entry || !suggestion.stop || !suggestion.target || track?.status !== "OK") blockers.push("A fresh, liquid option quote and complete risk plan are unavailable");
+    throw new Error(`Paper ${type} entry blocked: ${[...new Set(blockers)].join("; ")}`);
+  }
+  s.position = { side: "BUY", entry: suggestion.entry, stop: suggestion.stop, target: suggestion.target, time: s.clock,
+    contract: { ...suggestion.contract }, entryCosts: costs(suggestion.entry, suggestion.contract.multiplier, s.settings), maxRisk: suggestion.maxRisk,
+    settings: { ...s.settings }, optionEntryQuote: structuredClone(suggestion.quote), premiumAtRisk: suggestion.premiumAtRisk };
+  currentDay(s).trades++; s.lastEntryBar = s.candles.at(-1)!.time;
+  journal(s, "ENTRY", `Paper BUY ${type} · ${s.position.contract.symbol} · fixed 1 lot · premium fill INR ${suggestion.entry.toFixed(2)} · premium stop INR ${suggestion.stop.toFixed(2)} · planned loss INR ${suggestion.maxRisk.toFixed(2)} · full premium and entry charge INR ${suggestion.premiumAtRisk.toFixed(2)}; losses can exceed the stop plan`);
 }
 async function live(s: State, worker: boolean) {
   s.clock = new Date().toISOString();
@@ -96,8 +123,14 @@ async function live(s: State, worker: boolean) {
   s.context = await contexts;
   s.clock = new Date().toISOString();
   s.session = await marketSession(s.clock);
+  if (!worker || Date.now() - lastWorkerOptionPoll >= 5000 || hasNewOptionStreamQuote(s)) {
+    await pollOptions(s);
+    lastWorkerOptionPoll = Date.now();
+  }
+  s.clock = new Date().toISOString();
 }
-export type Command = "refresh" | "step" | "play" | "pause-replay" | "enter" | "exit" | "settings" | "assess" | "worker";
+let lastWorkerOptionPoll = 0;
+export type Command = "refresh" | "step" | "play" | "pause-replay" | "enter" | "enter-ce" | "enter-pe" | "exit" | "settings" | "assess" | "worker" | "heartbeat";
 const dashboardRefreshes = new Map<Mode, Promise<DashboardState>>();
 function savedView(s: State) {
   if (s.mode === "LIVE") s.feedHealth = feedHealth(s);
@@ -125,6 +158,12 @@ export async function operate(mode: Mode, command: Command, settings?: Partial<S
   return exclusive(mode, async () => {
     const s = readState(mode) ?? initial(mode);
     if (mode === "LIVE") s.clock = new Date().toISOString();
+    if (mode === "LIVE" && command === "heartbeat") {
+      s.lastWorker = s.clock;
+      s.feedHealth = feedHealth(s);
+      saveState(s);
+      return view(s);
+    }
     if (command === "settings") { if (s.position && Object.keys(settings ?? {}).some(k => k !== "paused")) throw new Error("Close the paper position before changing risk/cost rules"); s.settings = { ...s.settings, ...settings }; journal(s, "CONFIG", "Risk/rule configuration updated; existing daily lockouts preserved"); }
     if (command === "play") s.running = true;
     if (command === "pause-replay") s.running = false;
@@ -138,18 +177,22 @@ export async function operate(mode: Mode, command: Command, settings?: Partial<S
     }
     if (command === "worker") s.lastWorker = new Date().toISOString();
     let d = evaluate(s);
-    if (command === "enter") { try { d = enter(s); } catch (error) { journal(s, "SKIPPED", "Requested paper entry blocked by current signal, feed, or risk rules"); saveState(s, d); throw error; } }
+    if (command === "enter") { try { d = enter(s); } catch (error) { journal(s, "SKIPPED", error instanceof Error ? error.message : "Paper entry blocked; see current decision reasons"); saveState(s, d); throw error; } }
+    if (command === "enter-ce" || command === "enter-pe") {
+      try { enterOption(s, command === "enter-ce" ? "CE" : "PE"); d = evaluate(s); }
+      catch (error) { journal(s, "SKIPPED", error instanceof Error ? error.message : "Option paper entry blocked; see current option reasons"); saveState(s, d); throw error; }
+    }
     if (command === "exit" && s.position) {
       if (!canFill(s)) { journal(s, "SKIPPED", "Requested paper exit deferred: no fresh verified quote"); saveState(s, d); throw new Error("Cannot simulate a fill without a fresh quote"); }
-      const t = closePosition(s.position, s.candles.at(-1)!.close, s.clock, "Manual paper exit");
+      const t = closePosition(s.position, s.candles.at(-1)!.close, s.clock, "Manual paper exit", heldOptionQuote(s));
       s.trades.push(t); currentDay(s).net += t.net; s.position = null; s.pendingExitReason = undefined; s.lastEntryBar = s.candles.at(-1)!.time;
       journal(s, "EXIT", `Manual paper exit · costs ₹${t.costs.toFixed(2)} · net ₹${t.net.toFixed(2)}`);
       lock(s, currentDay(s).net - (currentDay(s).openingMark ?? 0));
     }
     if (command === "assess") assess(s, true);
     s.lastMark = mark(s);
-    saveState(s, d);
     if (mode === "LIVE") s.feedHealth = feedHealth(s);
+    saveState(s, d);
     return view(s);
   });
 }

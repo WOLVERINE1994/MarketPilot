@@ -24,7 +24,12 @@ export function db() {
         id TEXT PRIMARY KEY, started_at TEXT NOT NULL, received_at TEXT, exchange_time TEXT,
         status TEXT NOT NULL, symbol TEXT, token TEXT, price REAL, json TEXT NOT NULL);
       CREATE INDEX IF NOT EXISTS live_receipt ON live_observations(received_at);
+      CREATE INDEX IF NOT EXISTS live_observation_window ON live_observations(COALESCE(received_at,started_at));
+      CREATE INDEX IF NOT EXISTS live_pending_started ON live_observations(started_at) WHERE status='PENDING';
+      CREATE INDEX IF NOT EXISTS live_valid_exchange ON live_observations(exchange_time DESC) WHERE status='OK';
       CREATE INDEX IF NOT EXISTS live_contract_status ON live_observations(symbol,token,status,exchange_time);
+      CREATE TABLE IF NOT EXISTS option_observations (id TEXT PRIMARY KEY,time TEXT NOT NULL,json TEXT NOT NULL);
+      CREATE INDEX IF NOT EXISTS option_observation_time ON option_observations(time);
       CREATE TABLE IF NOT EXISTS forward_events (id TEXT PRIMARY KEY,time TEXT NOT NULL,json TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS forward_entries (id TEXT PRIMARY KEY,time TEXT NOT NULL,json TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS forward_trades (id TEXT PRIMARY KEY,entry_time TEXT NOT NULL,exit_time TEXT NOT NULL,json TEXT NOT NULL);
@@ -42,7 +47,17 @@ export function saveState(s: State, decision?: Decision) {
   const store = db(); store.exec("BEGIN IMMEDIATE");
   try {
     store.prepare("INSERT INTO states VALUES (?,?) ON CONFLICT(mode) DO UPDATE SET json=excluded.json").run(s.mode, JSON.stringify(s));
-    if (decision) store.prepare("INSERT INTO decisions VALUES (?,?,?,?)").run(decision.id, s.mode, decision.time, JSON.stringify(decision));
+    if (decision) {
+      let persistDecision = true;
+      if (s.mode === "LIVE") {
+        const latest = store.prepare("SELECT time,json FROM decisions WHERE mode='LIVE' ORDER BY time DESC,rowid DESC LIMIT 1").get() as { time: string; json: string } | undefined;
+        if (latest && latest.time.slice(0, 16) === decision.time.slice(0, 16)) {
+          const previous = JSON.parse(latest.json) as Decision;
+          persistDecision = previous.action !== decision.action || JSON.stringify(previous.reasons) !== JSON.stringify(decision.reasons);
+        }
+      }
+      if (persistDecision) store.prepare("INSERT INTO decisions VALUES (?,?,?,?)").run(decision.id, s.mode, decision.time, JSON.stringify(decision));
+    }
     if (s.mode === "LIVE") {
       // Materialize the complete audit stream independently of the UI's recent-event limit.
       const lastEvent = store.prepare("SELECT time FROM forward_events ORDER BY rowid DESC LIMIT 1").get() as {time: string} | undefined;
@@ -56,14 +71,18 @@ export function saveState(s: State, decision?: Decision) {
         const id = `${trade.time}/${trade.contract.token}`;
         const entry = { side: trade.side, entry: trade.entry, stop: trade.stop, target: trade.target,
           time: trade.time, contract: trade.contract, entryCosts: trade.entryCosts, maxRisk: trade.maxRisk, settings: trade.settings };
-        addEntry.run(id, trade.time, JSON.stringify(entry));
+        addEntry.run(id, trade.time, JSON.stringify({ ...entry, optionEntryQuote: trade.optionEntryQuote, premiumAtRisk: trade.premiumAtRisk }));
         addTrade.run(id, trade.time, trade.exitTime, JSON.stringify(trade));
       }
+      const optionQuote = s.position?.contract.instrument === "OPTION" ? s.optionDesk?.tracks[s.position.contract.token]?.quote ?? s.position.optionEntryQuote : undefined;
       const checkpoint = { time: s.clock, day: s.days.at(-1)!, position: s.position,
-        unrealized: liquidationNet(s.position, s.candles.at(-1)?.close ?? 0, s.clock),
+        unrealized: liquidationNet(s.position, s.candles.at(-1)?.close ?? 0, s.clock, optionQuote), optionQuote,
+        optionStatus: s.position?.contract.instrument === "OPTION" ? s.optionDesk?.tracks[s.position.contract.token]?.status : undefined,
         feed: s.feed, feedTime: s.feedTime, observationId: s.latestObservation?.id ?? null,
         context: s.context, settings: s.settings };
-      store.prepare("INSERT INTO forward_checkpoints VALUES (?,?,?)").run(decision?.id ?? crypto.randomUUID(), s.clock, JSON.stringify(checkpoint));
+      store.prepare(`INSERT INTO forward_checkpoints VALUES (?,?,?)
+        ON CONFLICT(id) DO UPDATE SET time=excluded.time,json=excluded.json`)
+        .run(`checkpoint:${s.days.at(-1)!.day}`, s.clock, JSON.stringify(checkpoint));
     }
     store.exec("COMMIT");
   } catch (error) { store.exec("ROLLBACK"); throw error; }

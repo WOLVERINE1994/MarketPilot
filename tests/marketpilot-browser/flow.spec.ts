@@ -3,10 +3,22 @@ test("live-only trading desk and isolated paper ledger validation", async ({ pag
   const errors: string[] = []; page.on("pageerror", e => errors.push(e.message));
   await page.goto("/");
   await expect(page.getByRole("heading", { name: "Your market, in focus." })).toBeVisible();
+  const streamedMode = await page.evaluate(() => new Promise<string>((resolve, reject) => {
+    const stream = new EventSource("/api/marketpilot/stream");
+    const timeout = window.setTimeout(() => { stream.close(); reject(new Error("LIVE event stream did not send its initial state")); }, 5000);
+    stream.onmessage = event => {
+      window.clearTimeout(timeout);
+      stream.close();
+      resolve((JSON.parse(event.data) as { mode: string }).mode);
+    };
+  }));
+  expect(streamedMode).toBe("LIVE");
   await expect(page.getByText("Live prices \u00b7 paper trades", { exact: true })).toBeVisible();
   await expect(page.getByRole("button", { name: "REPLAY", exact: true })).toHaveCount(0);
   await expect(page.getByRole("button", { name: "Next candle", exact: true })).toHaveCount(0);
   await expect(page.getByText("Waiting for verified market data", { exact: true })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "LIVE feed health" })).toBeHidden();
+  await expect(page.getByRole("button", { name: "Candles" })).toHaveAttribute("aria-pressed", "true");
   await page.getByRole("button", { name: "5m", exact: true }).click();
   await expect(page.getByRole("button", { name: "5m", exact: true })).toHaveClass("selected");
   const command = async (command: string, mode = "REPLAY") => { const r = await request.post("/api/marketpilot", { data: { mode, command } }); expect(r.ok()).toBeTruthy(); return r.json(); };
@@ -29,15 +41,22 @@ test("live-only trading desk and isolated paper ledger validation", async ({ pag
   await page.reload(); await expect(page.getByText("No open position", { exact: true })).toBeVisible();
   await page.getByRole("button", { name: "Run assessment now" }).click();
   await expect(page.getByText(/Latest assessment/)).toBeVisible();
+  await page.getByRole("button", { name: "Journal & stats", exact: true }).click();
   await page.getByRole("button", { name: "Results", exact: true }).click(); await expect(page.getByText("Positive days", { exact: true })).toBeVisible();
   await page.screenshot({ path: ".marketpilot-e2e/desktop.png", fullPage: true });
   const exportResponse = await request.get("/api/marketpilot?mode=REPLAY"); const snapshots = await exportResponse.json();
   expect(snapshots[0].ruleVersion).toBe("transparent-1.1.0"); expect(snapshots[0].snapshot.candles.length).toBeGreaterThan(0);
   expect(snapshots[0].snapshot.candles.every((b: {time:string}) => b.time <= snapshots[0].time)).toBeTruthy();
+  await page.getByRole("button", { name: "Candles", exact: true }).click();
   await expect(page.getByText("CONTRACT UNVERIFIED", { exact: true })).toBeVisible();
   await expect(page.locator(".mp-signal strong")).toHaveText("WAIT");
+  await page.getByRole("button", { name: "Market details", exact: true }).click();
   await expect(page.locator(".mp-context-item").getByText("UNAVAILABLE", { exact: true })).toHaveCount(3);
   await expect(page.getByRole("heading", { name: "LIVE feed health" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Crude Oil Mini · CE / PE" })).toBeVisible();
+  await expect(page.getByRole("article", { name: "CE suggestion" }).getByRole("button", { name: "WAIT · CE" })).toBeDisabled();
+  await expect(page.getByRole("article", { name: "PE suggestion" }).getByRole("button", { name: "WAIT · PE" })).toBeDisabled();
+  await expect(page.getByRole("article", { name: "CE suggestion" })).toContainText("Mini option specifications unverified");
   await expect(page.getByText("LIVE setup checklist", { exact: true })).toBeVisible();
   await expect(page.getByText("ANGEL_ACCESS_TOKEN", { exact: true })).toBeVisible();
   await expect(page.getByText("MARKETPILOT_SESSION_FILE", { exact: true })).toBeVisible();
@@ -65,14 +84,20 @@ test("live-only trading desk and isolated paper ledger validation", async ({ pag
 test("mobile layout, risk settings and paper-only controls", async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 }); await page.goto("/");
   await expect(page.getByRole("heading", { name: "Decision desk" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Crude Oil Mini" })).toBeVisible();
+  await page.getByRole("button", { name: "Market details", exact: true }).click();
+  await expect(page.getByRole("article", { name: "CE suggestion" })).toBeVisible();
+  await expect(page.getByRole("article", { name: "PE suggestion" })).toBeVisible();
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBeTruthy();
   await page.getByRole("button", { name: "Open risk settings" }).click();
   await expect(page.getByRole("dialog")).toBeVisible();
   await page.getByLabel("Max loss / trade (₹)", { exact: true }).fill("450");
   await page.getByRole("button", { name: "Save guardrails" }).click();
   await expect(page.getByRole("dialog")).toHaveCount(0);
+  await page.getByRole("button", { name: "Journal & stats", exact: true }).click();
   await expect(page.getByText("₹450.00", { exact: true })).toBeVisible();
   await page.screenshot({ path: ".marketpilot-e2e/mobile.png", fullPage: true });
+  await page.getByRole("button", { name: "Market details", exact: true }).click();
   await expect(page.getByRole("heading", { name: "LIVE feed health" })).toBeVisible();
   await expect(page.getByLabel("Report date · IST")).toBeVisible();
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBeTruthy();
@@ -93,3 +118,43 @@ test("production protects both the page and API before allowing authenticated pe
   expect(snapshots.ok()).toBeTruthy();
   expect((await snapshots.json()).length).toBeGreaterThan(0);
 });
+
+// Browser-only synthetic fixtures exercise controls without placing any entries
+// in the isolated server's LIVE ledger or the user's real local workspace.
+for (const type of ["CE", "PE"] as const) {
+  test(`${type} eligible paper button opens the correct option and supports exit`, async ({ page, request }) => {
+    const response = await request.post("/api/marketpilot", { data: { mode: "LIVE", command: "refresh" } });
+    const fixture = await response.json();
+    const time = new Date().toISOString();
+    const underlying = { symbol: "CRUDEOILM19OCT26FUT", token: "569901", expiry: "2026-10-19", lotSize: 10, multiplier: 10, tickSize: 1, verified: true, source: "https://www.mcxindia.com/test-fixture" };
+    const contract = { ...underlying, symbol: `CRUDEOILM15OCT268550${type}`, token: "580001", expiry: "2026-10-15", tickSize: 0.05, instrument: "OPTION", optionType: type, strike: 8550, underlyingSymbol: underlying.symbol };
+    const quote = { id: "browser-test-quote", contract, time, tradeTime: time, receivedAt: time, ltp: 209.5, bid: 209.25, ask: 209.75, bidQuantity: 100, askQuantity: 100, volume: 1000, openInterest: 1000 };
+    fixture.clock = time; fixture.contract = underlying; fixture.feed = "CONNECTED"; fixture.feedTime = time;
+    fixture.candles = [{time,open:8562,high:8563,low:8561,close:8562,volume:0}];
+    fixture.feedHealth = { ...fixture.feedHealth, connection: "CONNECTED_AND_VERIFIED", latestStatus: "OK", lastValidExchangeTime: time, ageSeconds: 0 };
+    fixture.optionDesk = { checkedAt: time, setupReason: "", selected: { [type]: contract.token }, tracks: { [contract.token]: { contract, quote, status: "OK", reason: "BROWSER TEST ONLY", candles: [] } },
+      suggestions: [{ type, action: "BUY", reasons: ["BROWSER TEST ONLY: eligible option"], contract, quote, entry: 210.75, stop: 188, target: 265, maxRisk: 278, estimatedCosts: 41, premiumAtRisk: 2128, status: "OK", observedCandles: 32 }] };
+    const commands: string[] = [];
+    await page.route("**/api/marketpilot", async route => {
+      const input = route.request().postDataJSON(); commands.push(input.command);
+      if (input.command === `enter-${type.toLowerCase()}`) {
+        fixture.position = { side: "BUY", entry: 210.75, stop: 188, target: 265, time, contract, entryCosts: 20.53, maxRisk: 278, settings: fixture.settings, optionEntryQuote: quote, premiumAtRisk: 2128 };
+        fixture.decision = { ...fixture.decision, action: "HOLD", entry: 210.75, stop: 188, target: 265, maxRisk: 278, reasons: ["BROWSER TEST ONLY: option thesis intact"] };
+        fixture.unrealized = -56; fixture.equity = -56;
+      }
+      if (input.command === "exit") { fixture.position = null; fixture.decision.action = "WAIT"; }
+      await route.fulfill({ status: 200, json: fixture });
+    });
+    await page.goto("/");
+    const card = page.getByRole("article", { name: `${type} suggestion` });
+    const enter = card.getByRole("button", { name: `Paper BUY ${type} · 1 lot` });
+    await expect(enter).toBeEnabled(); await enter.click();
+    await expect(card.getByText("HOLD", { exact: true })).toBeVisible();
+    await expect(page.getByText("OPEN PAPER POSITION", { exact: true })).toBeVisible();
+    await expect(page.locator(".mp-price-row > strong")).toHaveText("₹8,562.00");
+    await expect(card.getByRole("button", { name: `Paper ${type} position open` })).toBeDisabled();
+    await page.getByRole("button", { name: "Exit paper position", exact: true }).click();
+    await expect(page.getByText("No open position", { exact: true })).toBeVisible();
+    expect(commands).toContain(`enter-${type.toLowerCase()}`); expect(commands).toContain("exit");
+  });
+}

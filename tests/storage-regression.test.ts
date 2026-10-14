@@ -130,6 +130,42 @@ describe("native SQLite persistence regressions", () => {
     expect(result).toEqual({ rejected: true, paused: false, count: 1 });
   });
 
+  it("coalesces unchanged LIVE decisions within a minute and keeps one current valuation per day", () => {
+    const result = run(workspace(), `
+      import { initial,evaluate } from './src/marketpilot/engine.ts';
+      import { saveState,db } from './src/marketpilot/storage.ts';
+      const s=initial('LIVE');s.clock='2026-10-13T04:00:00.000Z';s.days[0].day='2026-10-13';
+      saveState(s,evaluate(s));
+      s.clock='2026-10-13T04:00:20.000Z';saveState(s,evaluate(s));
+      const stableCount=db().prepare(\"SELECT COUNT(*) AS n FROM decisions WHERE mode='LIVE'\").get().n;
+      const changed=evaluate(s);changed.reasons=[...changed.reasons,'persisted reason transition'];saveState(s,changed);
+      const withinMinute={stableCount,decisions:db().prepare(\"SELECT COUNT(*) AS n FROM decisions WHERE mode='LIVE'\").get().n,
+        checkpoints:db().prepare('SELECT COUNT(*) AS n FROM forward_checkpoints').get().n};
+      s.clock='2026-10-13T04:01:00.000Z';saveState(s,evaluate(s));
+      const later={decisions:db().prepare(\"SELECT COUNT(*) AS n FROM decisions WHERE mode='LIVE'\").get().n,
+        checkpoints:db().prepare('SELECT COUNT(*) AS n FROM forward_checkpoints').get().n,
+        checkpointTime:db().prepare('SELECT time FROM forward_checkpoints').get().time};
+      console.log(JSON.stringify({withinMinute,later}));
+    `);
+    expect(result.withinMinute).toEqual({ stableCount: 1, decisions: 2, checkpoints: 1 });
+    expect(result.later).toEqual({ decisions: 3, checkpoints: 1, checkpointTime: "2026-10-13T04:01:00.000Z" });
+  });
+
+  it("indexes the observation lookups used by feed health and pending recovery", () => {
+    const result = run(workspace(), `
+      import { db } from './src/marketpilot/storage.ts';
+      const plan=(sql,...args)=>db().prepare('EXPLAIN QUERY PLAN '+sql).all(...args).map(row=>row.detail).join(' ');
+      console.log(JSON.stringify({
+        window:plan('SELECT COUNT(*) FROM live_observations WHERE COALESCE(received_at,started_at)>=? AND COALESCE(received_at,started_at)<?','2026-10-13','2026-10-14'),
+        pending:plan(\"SELECT json FROM live_observations WHERE status='PENDING'\"),
+        latestValid:plan(\"SELECT json FROM live_observations WHERE status='OK' ORDER BY exchange_time DESC,rowid DESC LIMIT 1\")
+      }));
+    `);
+    expect(result.window).toContain("live_observation_window");
+    expect(result.pending).toContain("live_pending_started");
+    expect(result.latestValid).toContain("live_valid_exchange");
+  });
+
   it("fails closed if native SQLite is unavailable", () => {
     const result = run(workspace(), `
       import { db } from './src/marketpilot/storage.ts';

@@ -2,11 +2,13 @@ import { db } from "./storage";
 import { istDay } from "./time";
 import { paperPerformance } from "./performance";
 import type { ContextItem, Contract, Day, Decision, Journal, Position, Settings, Trade } from "./types";
+import type { OptionObservation, OptionQuote } from "./option-types";
 
 export type ForwardCheckpoint = {
   time: string; day: Day; position: Position | null; unrealized: number;
   feed: string; feedTime: string | null; observationId: string | null;
   context: ContextItem[]; settings: Settings;
+  optionQuote?: OptionQuote; optionStatus?: string;
 };
 type Observation = {
   id: string; startedAt: string; receivedAt: string | null; exchangeTime: string | null;
@@ -36,6 +38,7 @@ export function forwardSessionReport(day: string, now = new Date().toISOString()
   store.exec("BEGIN");
   try {
     const observations = parsed<Observation>(store.prepare("SELECT json FROM live_observations WHERE COALESCE(received_at,started_at)>=? AND COALESCE(received_at,started_at)<? AND COALESCE(received_at,started_at)<=? ORDER BY COALESCE(received_at,started_at),rowid").all(window.start, window.end, window.asOf));
+    const optionObservations = parsed<OptionObservation>(store.prepare("SELECT json FROM option_observations WHERE time>=? AND time<? AND time<=? ORDER BY time,rowid").all(window.start, window.end, window.asOf));
     const pendingAtStart = parsed<Observation>(store.prepare("SELECT json FROM live_observations WHERE started_at<? AND received_at IS NULL AND status='PENDING' ORDER BY started_at,rowid").all(window.start));
     const decisions = parsed<Decision>(store.prepare("SELECT json FROM decisions WHERE mode='LIVE' AND time>=? AND time<? AND time<=? ORDER BY time,rowid").all(window.start, window.end, window.asOf));
     const journal = parsed<Journal>(store.prepare("SELECT json FROM forward_events WHERE time>=? AND time<? AND time<=? ORDER BY time,rowid").all(window.start, window.end, window.asOf));
@@ -47,8 +50,14 @@ export function forwardSessionReport(day: string, now = new Date().toISOString()
     const linked = linkedRow ? JSON.parse(linkedRow.json) as Observation : null;
     const currentCheckpoint = checkpoint?.day.day === day ? checkpoint : null;
     const position = checkpoint?.position ?? null;
-    const ageSeconds = checkpoint?.feedTime ? (Date.parse(window.asOf) - Date.parse(checkpoint.feedTime)) / 1000 : null;
-    const verifiedMark = !!currentCheckpoint && checkpoint?.feed === "CONNECTED" && linked?.status === "OK" && linked.price !== null && linked.exchangeTime === checkpoint.feedTime && ageSeconds !== null && ageSeconds >= 0 && ageSeconds <= 30 && (!position || (linked.contract?.symbol === position.contract.symbol && linked.contract?.token === position.contract.token && linked.contract?.verified === true));
+    const markTime = position?.contract.instrument === "OPTION" ? checkpoint?.optionQuote?.time : checkpoint?.feedTime;
+    const ageSeconds = markTime ? (Date.parse(window.asOf) - Date.parse(markTime)) / 1000 : null;
+    const optionRow = checkpoint?.optionQuote?.id ? store.prepare("SELECT json FROM option_observations WHERE id=? AND time<=?").get(checkpoint.optionQuote.id, window.asOf) as {json: string} | undefined : undefined;
+    const option = optionRow ? JSON.parse(optionRow.json) as OptionObservation : null;
+    const optionMark = position?.contract.instrument === "OPTION" && checkpoint?.optionStatus === "OK" && option?.status === "OK" &&
+      option.quote?.time === markTime && option.contract.token === position.contract.token && option.contract.symbol === position.contract.symbol &&
+      !!option.quote && option.quote.bidQuantity >= position.contract.lotSize && linked?.contract?.symbol === position.contract.underlyingSymbol;
+    const verifiedMark = !!currentCheckpoint && checkpoint?.feed === "CONNECTED" && linked?.status === "OK" && linked.price !== null && linked.exchangeTime === checkpoint.feedTime && ageSeconds !== null && ageSeconds >= 0 && ageSeconds <= 30 && (!position || (position.contract.instrument === "OPTION" ? optionMark : linked.contract?.symbol === position.contract.symbol && linked.contract?.token === position.contract.token && linked.contract?.verified === true));
     const realizedNet = exits.reduce((sum, trade) => sum + trade.net, 0);
     const openingMark = currentCheckpoint?.day.openingMark ?? 0;
     const markedDailyEstimate = currentCheckpoint && Number.isFinite(currentCheckpoint.unrealized)
@@ -67,7 +76,7 @@ export function forwardSessionReport(day: string, now = new Date().toISOString()
     const result = {
       schemaVersion: "forward-session-1.0", mode: "LIVE" as const, day, timezone: "Asia/Kolkata",
       generatedAt: now, window, asOfCheckpoint: checkpoint,
-      observations, pendingAtStart, decisions, entries, exits, journal,
+      observations, optionObservations, pendingAtStart, decisions, entries, exits, journal,
       assessments: journal.filter(event => event.kind === "ASSESSMENT"),
       closedPaperPerformance: paperPerformance(exits),
       riskLockouts: journal.filter(event => event.kind === "RISK_LOCKOUT"),
@@ -78,7 +87,7 @@ export function forwardSessionReport(day: string, now = new Date().toISOString()
         realizedNet, openingMarkEstimate: currentCheckpoint ? openingMark : null,
         unrealizedEstimate: currentCheckpoint?.unrealized ?? null,
         markedDailyEstimate, netDaily: canValue ? markedDailyEstimate : null,
-        position, markExchangeTime: checkpoint?.feedTime ?? null, markAgeSeconds: ageSeconds,
+        position, markExchangeTime: markTime ?? null, markAgeSeconds: ageSeconds,
         valuationCurrent: !position ? !!currentCheckpoint : verifiedMark,
         provisional: !!position || !currentCheckpoint || day === istDay(now),
         explanation: !currentCheckpoint ? "No saved LIVE valuation for this IST date. A carried position is shown when known; absence of records is not a flat trading day."

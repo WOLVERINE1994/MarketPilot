@@ -2,7 +2,7 @@ import type { Decision, State } from "./types";
 import { fresh, istDay } from "./time";
 import { costs, fillPrice } from "./paper";
 import { riskBlock } from "./risk";
-export function decide(state: State, equity: number): Decision {
+export function decide(state: State, equity: number, pricing: "FUTURES" | "DIRECTION" = "FUTURES"): Decision {
   const { candles: bars, settings: s, contract, position: p, clock: now } = state;
   const last = bars.at(-1), price = last?.close ?? 0;
   const avg = (n: number) => bars.slice(-n).reduce((a, b) => a + b.close, 0) / Math.max(1, Math.min(n, bars.length));
@@ -11,11 +11,12 @@ export function decide(state: State, equity: number): Decision {
   const recent = bars.slice(-14);
   const atr = recent.reduce((a, b, i) => a + Math.max(b.high - b.low, Math.abs(b.high - (recent[i - 1]?.close ?? b.open)), Math.abs(b.low - (recent[i - 1]?.close ?? b.open))), 0) / Math.max(1, recent.length);
   const d: Decision = { id: crypto.randomUUID(), time: now, action: "WAIT", reasons: [], ruleVersion: "transparent-1.1.0", entry: null, stop: null, target: null, estimatedCosts: 0, maxRisk: 0, exitCondition: "Stop, 2R target, trend/momentum reversal, data failure, or risk lockout; adverse gaps can exceed planned loss.", snapshot: { session: structuredClone(state.session), candles: structuredClone(bars.slice(-Math.max(s.slow + 3, 15))), position: structuredClone(p), day: { ...state.days.at(-1)! }, equity, price: last ? price : null, fast, slow, momentum, atr, feed: state.feed, contract, context: structuredClone(state.context), settings: { ...s } } };
-  const session = state.session, sessionTime = Date.parse(now);
-  const sessionOpen = !!session && session.status === "OPEN" && session.entriesAllowed && session.day === istDay(now) &&
+  const session = state.session ?? { day: istDay(now), status: "UNVERIFIED", entriesAllowed: false, reason: "MCX session unverified; new entries blocked", source: null, opensAt: null, closesAt: null };
+  const sessionTime = Date.parse(now);
+  const sessionOpen = session.status === "OPEN" && session.entriesAllowed && session.day === istDay(now) &&
     Number.isFinite(Date.parse(session.opensAt ?? "")) && Number.isFinite(Date.parse(session.closesAt ?? "")) &&
     sessionTime >= Date.parse(session.opensAt!) && sessionTime < Date.parse(session.closesAt!) - 5 * 60000;
-  const sessionReason = session?.status === "OPEN" ? "MCX session is no longer verified open at the current IST time; new entries blocked" : session?.reason ?? "MCX session unverified; new entries blocked";
+  const sessionReason = session.status === "OPEN" ? "MCX session is no longer verified open at the current IST time; new entries blocked" : session.reason || "MCX session unverified; new entries blocked";
   const badFeed = state.feed !== "CONNECTED" || !fresh(state.feedTime, now) || !contract?.verified;
   if (p) {
     d.entry = p.entry; d.stop = p.stop; d.target = p.target; d.maxRisk = p.maxRisk;
@@ -44,13 +45,20 @@ export function decide(state: State, equity: number): Decision {
   if (state.lastEntryBar && last && state.lastEntryBar.slice(0, 16) === last.time.slice(0, 16)) d.reasons.push("Entry or exit already used this candle; no immediate re-entry");
   const history = bars.slice(-(s.slow + 3));
   if (history.some((b, i) => i > 0 && Date.parse(b.time) - Date.parse(history[i - 1].time) > 120000)) d.reasons.push("Recent candle history contains a feed gap; rebuild continuous evidence");
-  if (state.context.some(c => c.block)) d.reasons.push("Global context risk blocker is active");
-  if (s.requireContext && ["WTI", "Brent", "Oil news"].some(name => { const c = state.context.find(item => item.name === name); return !c || c.status === "UNAVAILABLE" || (state.mode === "LIVE" && c.status !== "LIVE") || !fresh(c.time, now, 900); })) d.reasons.push("Global confirmation is unavailable or stale");
+  const contextBlockers = state.context.filter(c => c.block);
+  if (contextBlockers.some(c => c.name === "Oil news")) d.reasons.push("An oil-news headline matched an event-risk keyword; entries are blocked (see Beyond MCX)");
+  if (contextBlockers.some(c => c.name !== "Oil news")) d.reasons.push("A global context risk blocker is active");
+  if (s.requireContext && ["WTI", "Brent", "Oil news"].some(name => { const c = state.context.find(item => item.name === name); return !c || c.status === "UNAVAILABLE" || (state.mode === "LIVE" && c.status !== "LIVE") || !fresh(c.time, now, c.freshnessSeconds ?? 900); })) d.reasons.push("Global confirmation is unavailable or stale");
   if (atr / Math.max(price, 1) * 100 > s.maxVolatility) d.reasons.push("Volatility exceeds the configured ceiling");
   if (d.reasons.length) return d;
   const side = fast > slow && momentum > s.momentum ? "BUY" : fast < slow && momentum < -s.momentum ? "SELL" : null;
   if (!side || Math.abs(fast - slow) < atr * 0.3) { d.reasons.push("Trend and momentum are weak or conflicting; preserve capital"); return d; }
-  if (state.context.some(c => fresh(c.time, now, 900) && ((side === "BUY" && c.bias === "DOWN") || (side === "SELL" && c.bias === "UP")))) { d.reasons.push("Global direction conflicts with the proposed entry"); return d; }
+  if (state.context.some(c => fresh(c.time, now, c.freshnessSeconds ?? 900) && ((side === "BUY" && c.bias === "DOWN") || (side === "SELL" && c.bias === "UP")))) { d.reasons.push("Global direction conflicts with the proposed entry"); return d; }
+  if (pricing === "DIRECTION") {
+    d.action = side;
+    d.reasons.push(`Underlying trend and momentum align ${side === "BUY" ? "up for CE" : "down for PE"}; option premium and risk must be checked separately`);
+    return d;
+  }
   const sign = side === "BUY" ? 1 : -1, tick = contract!.tickSize;
   const distance = Math.ceil(Math.max(atr * 1.6, tick * 4) / tick) * tick;
   d.entry = fillPrice(price, sign, tick, s);

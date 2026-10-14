@@ -1,6 +1,6 @@
 import type { Contract } from "./types";
 import { istDay } from "./time";
-export type Instrument = { name: string; symbol: string; token: string; expiry: string; lotsize: string; tick_size: string; instrumenttype: string; exch_seg: string };
+export type Instrument = { name: string; symbol: string; token: string; expiry: string; lotsize: string; tick_size: string; instrumenttype: string; exch_seg: string; strike?: string };
 export type Specification = { symbol: string; expiry: string; lotSize: number; multiplier: number; tickSize: number; source: string; verifiedAt: string; validUntil: string };
 export function expiryDate(value: string) {
   const match = /^(\d{2})([A-Z]{3})(\d{4})$/i.exec(value);

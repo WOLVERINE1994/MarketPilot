@@ -5,6 +5,11 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="theme-color" content="#0d1117">
 <title>MarketPilot · MCX Desk</title>
+<link rel="manifest" href="/manifest.webmanifest">
+<link rel="icon" href="/icon.svg">
+<link rel="apple-touch-icon" href="/apple-touch-icon.png">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
 <style>
   :root { --bg:#0d1117; --panel:#161b22; --line:#262d36; --text:#e6edf3; --muted:#8b949e; --green:#2ea043; --green-soft:#1a3d26; --red:#e5534b; --red-soft:#3d1d1c; --amber:#d29922; --amber-soft:#3a2d12; --blue:#4c8dff; }
   * { box-sizing: border-box; }
@@ -54,6 +59,7 @@
   <h1>MarketPilot</h1><span class="pill" id="mode">MCX</span>
   <span class="sp"></span>
   <span class="pill" id="feed"><span class="dot"></span>Connecting…</span>
+  <button id="install" hidden>⬇ Install app</button>
   <button id="alerts" title="Sound and pop-up alerts on this device">🔔 Alerts</button>
 </header>
 <main>
@@ -68,7 +74,7 @@
   <section class="panel"><h3>Signals</h3><div id="signals"></div></section>
   <section class="panel"><h3>Paper results <a href="/api/trades.csv">Download CSV</a></h3><div id="closed"></div></section>
 </main>
-<footer>Signals and paper tracking only — orders are placed by you in the Angel One app. Estimated option levels assume delta ≈ 0.5. Past or paper results do not guarantee future profit.</footer>
+<footer><a href="/logout" style="color:var(--muted)">Sign out</a><br><br>Signals and paper tracking only — orders are placed by you in the Angel One app. Estimated option levels assume delta ≈ 0.5. Past or paper results do not guarantee future profit.</footer>
 <script>
 const $ = id => document.getElementById(id);
 const money = n => n == null || !isFinite(n) ? "—" : (n < 0 ? "−₹" : "₹") + Math.abs(n).toLocaleString("en-IN", { maximumFractionDigits: 0 });
@@ -159,9 +165,16 @@ function render(s) {
 function connect() {
   const es = new EventSource("/api/events");
   es.onmessage = e => { try { render(JSON.parse(e.data)); } catch (err) { console.error(err); } };
-  es.onerror = () => { $("feed").className = "pill bad"; $("feed").innerHTML = '<span class="dot"></span>Reconnecting…'; };
+  es.onerror = async () => {
+    try { const r = await fetch("/api/state"); if (r.status === 401) { location.href = "/login"; return; } } catch {} $("feed").className = "pill bad"; $("feed").innerHTML = '<span class="dot"></span>Reconnecting…'; };
 }
 connect();
+// Phone app: register the service worker and offer the install button when Chrome allows it.
+if ("serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js").catch(() => {});
+let installPrompt = null;
+addEventListener("beforeinstallprompt", e => { e.preventDefault(); installPrompt = e; $("install").hidden = false; });
+$("install").onclick = async () => { if (!installPrompt) return; installPrompt.prompt(); await installPrompt.userChoice; installPrompt = null; $("install").hidden = true; };
+addEventListener("appinstalled", () => { $("install").hidden = true; });
 </script>
 </body>
 </html>

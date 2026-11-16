@@ -37,9 +37,13 @@ npm start
 
 Leave the window open during market hours. At startup MarketPilot loads the last few days of candles from Angel One, so signals work right away with no warm-up wait.
 
-- Dashboard: http://127.0.0.1:3100. To open it on your phone over the same Wi-Fi, set `HOST=0.0.0.0` and a `DASHBOARD_PASSWORD` in `.env`, then open `http://<your-computer-IP>:3100`. The username can be anything.
+- Dashboard: http://127.0.0.1:3100. To open it on your phone over the same Wi-Fi, set `HOST=0.0.0.0` and a `DASHBOARD_PASSWORD` (8+ characters) in `.env`, then open `http://<your-computer-IP>:3100` and sign in.
 - Click **🔕 Off** on the dashboard to turn on sound and pop-up alerts in that browser.
 - Paper results are saved in `data/journal.jsonl`. Download them from the dashboard as CSV.
+
+## 3b. No laptop? Run it on a cloud server and use it as a phone app
+
+See **[DEPLOY.md](DEPLOY.md)**. One command installs MarketPilot on a small cloud server, where it runs 24×7 and logs in by itself every morning. You get Telegram alerts plus the dashboard as an installable phone app (home-screen icon, password sign-in, private HTTPS through Tailscale).
 
 ## 4. Backtest before you trust it
 
@@ -97,7 +101,8 @@ src/risk.js          one-lot plan: premium, option stop/target, rupee risk, warn
 src/desk.js          ties it together: candles → signals → alerts → paper trades
 src/backtest*.js     backtester
 src/feeds.js         live Angel One feed and the demo simulator
-src/server.js        dashboard server (page, JSON, live updates, CSV)
-public/index.html    dashboard
+src/server.js        dashboard server (sign-in, page, JSON, live updates, CSV)
+public/              dashboard, sign-in page, phone-app manifest, icons, service worker
+deploy/              one-command server installer and systemd service (see DEPLOY.md)
 test/                automated tests:  npm test
 ```

@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { Desk } from "../src/desk.js";
@@ -100,27 +100,46 @@ test("futures mode for crude produces a futures plan and futures P&L", async () 
   assert.ok(Math.abs(closed.pnl - ((sig.futures.target + 1 - price) * 10 - 60)) < 0.01);
 });
 
-test("dashboard server serves the page, JSON, SSE and CSV, and enforces the password", async () => {
-  const { desk } = setup();
+test("dashboard: sign-in page, cookie session, phone-app files, JSON, SSE, CSV and wrong-password limit", async () => {
+  const { desk, config } = setup();
   await desk.start(); desk.stop();
-  const server = startServer(desk, { port: 0, host: "127.0.0.1", password: "s3cret" });
+  const server = startServer(desk, { port: 0, host: "127.0.0.1", password: "s3cret-pass", dataDir: config.dataDir });
   await new Promise(r => server.once("listening", r));
   const base = `http://127.0.0.1:${server.address().port}`;
-  const auth = { Authorization: "Basic " + Buffer.from("pilot:s3cret").toString("base64") };
+  const login = pw => fetch(base + "/login", { method: "POST", redirect: "manual", headers: { "Content-Type": "application/x-www-form-urlencoded" }, body: `password=${encodeURIComponent(pw)}` });
   try {
-    assert.equal((await fetch(base + "/")).status, 401);
-    const page = await fetch(base + "/", { headers: auth });
-    assert.equal(page.status, 200); assert.match(await page.text(), /MarketPilot/);
-    const state = await (await fetch(base + "/api/state", { headers: auth })).json();
+    const home = await fetch(base + "/", { redirect: "manual" });
+    assert.equal(home.status, 303); assert.equal(home.headers.get("location"), "/login");
+    assert.equal((await fetch(base + "/api/state")).status, 401);
+    assert.match(await (await fetch(base + "/login")).text(), /Sign in/);
+    for (const f of ["/manifest.webmanifest", "/sw.js", "/icon-192.png", "/icon-512.png", "/offline.html"]) assert.equal((await fetch(base + f)).status, 200, f);
+    const manifest = await (await fetch(base + "/manifest.webmanifest")).json();
+    assert.equal(manifest.display, "standalone"); assert.equal(manifest.icons.length, 2);
+
+    const bad = await login("nope");
+    assert.equal(bad.status, 401); assert.match(await bad.text(), /Wrong password/);
+    const ok = await login("s3cret-pass");
+    assert.equal(ok.status, 303);
+    const cookie = ok.headers.get("set-cookie").split(";")[0];
+    assert.match(ok.headers.get("set-cookie"), /HttpOnly; SameSite=Strict/);
+    const headers = { Cookie: cookie };
+    const page = await fetch(base + "/", { headers });
+    assert.equal(page.status, 200); assert.match(await page.text(), /manifest\.webmanifest/);
+    const state = await (await fetch(base + "/api/state", { headers })).json();
     assert.equal(state.products[0].key, "CRUDEOILM");
-    const csv = await fetch(base + "/api/trades.csv", { headers: auth });
-    assert.match(await csv.text(), /^date,entry_time/);
+    assert.match(await (await fetch(base + "/api/trades.csv", { headers })).text(), /^date,entry_time/);
     const ctrl = new AbortController();
-    const sse = await fetch(base + "/api/events", { headers: auth, signal: ctrl.signal });
-    const reader = sse.body.getReader();
-    const first = new TextDecoder().decode((await reader.read()).value);
+    const sse = await fetch(base + "/api/events", { headers, signal: ctrl.signal });
+    const first = new TextDecoder().decode((await sse.body.getReader().read()).value);
     assert.match(first, /^data: \{/);
     ctrl.abort();
+    // Sessions survive a restart (stored hashed on disk), and sign-out ends them.
+    assert.ok(!readFileSync(path.join(config.dataDir, "sessions.json"), "utf8").includes(cookie.split("=")[1]));
+    await fetch(base + "/logout", { headers, redirect: "manual" });
+    assert.equal((await fetch(base + "/api/state", { headers })).status, 401);
+    // Brute force: after 10 wrong passwords, even the right one is refused for 15 minutes.
+    for (let i = 0; i < 10; i++) await login("wrong" + i);
+    assert.equal((await login("s3cret-pass")).status, 429);
   } finally { server.close(); server.closeAllConnections?.(); }
 });
 

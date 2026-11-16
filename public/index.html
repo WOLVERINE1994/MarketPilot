@@ -1,0 +1,167 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0d1117">
+<title>MarketPilot · MCX Desk</title>
+<style>
+  :root { --bg:#0d1117; --panel:#161b22; --line:#262d36; --text:#e6edf3; --muted:#8b949e; --green:#2ea043; --green-soft:#1a3d26; --red:#e5534b; --red-soft:#3d1d1c; --amber:#d29922; --amber-soft:#3a2d12; --blue:#4c8dff; }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--text); font:15px/1.45 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif; }
+  header { position:sticky; top:0; z-index:5; display:flex; align-items:center; gap:10px; padding:12px 16px; background:rgba(13,17,23,.94); backdrop-filter:blur(6px); border-bottom:1px solid var(--line); }
+  header h1 { font-size:17px; margin:0; letter-spacing:.2px; }
+  header .sp { flex:1; }
+  .pill { display:inline-flex; align-items:center; gap:6px; padding:3px 9px; border-radius:99px; font-size:12px; font-weight:600; background:#21262d; color:var(--muted); white-space:nowrap; }
+  .pill.ok { background:var(--green-soft); color:#56d364; } .pill.bad { background:var(--red-soft); color:#ff7b72; } .pill.warn { background:var(--amber-soft); color:#e3b341; }
+  .dot { width:7px; height:7px; border-radius:50%; background:currentColor; }
+  main { max-width:1100px; margin:0 auto; padding:14px 12px 40px; display:grid; gap:14px; }
+  .summary { display:grid; grid-template-columns:repeat(4,1fr); gap:10px; }
+  .kpi { background:var(--panel); border:1px solid var(--line); border-radius:12px; padding:10px 12px; }
+  .kpi span { display:block; font-size:12px; color:var(--muted); } .kpi b { font-size:19px; }
+  .grid { display:grid; grid-template-columns:1fr 1fr; gap:14px; }
+  .card { background:var(--panel); border:1px solid var(--line); border-radius:14px; overflow:hidden; }
+  .card-head { display:flex; align-items:baseline; gap:8px; padding:12px 14px 4px; }
+  .card-head h2 { margin:0; font-size:16px; } .card-head small { color:var(--muted); font-size:12px; }
+  .price { display:flex; align-items:baseline; gap:10px; padding:0 14px; }
+  .price b { font-size:26px; letter-spacing:-.3px; } .up { color:#56d364; } .down { color:#ff7b72; }
+  .signal { margin:10px 14px; border-radius:12px; padding:12px 14px; background:#21262d; }
+  .signal .act { font-size:22px; font-weight:800; letter-spacing:.3px; }
+  .signal.buy { background:var(--green-soft); } .signal.buy .act { color:#56d364; }
+  .signal.sell { background:var(--red-soft); } .signal.sell .act { color:#ff7b72; }
+  .signal p { margin:4px 0 0; color:#c9d1d9; font-size:13.5px; }
+  .levels { display:grid; grid-template-columns:repeat(3,1fr); gap:8px; margin-top:10px; }
+  .levels div { background:rgba(0,0,0,.25); border-radius:8px; padding:6px 8px; } .levels span { display:block; font-size:11px; color:var(--muted); } .levels b { font-size:15px; }
+  .warn-list { margin:8px 0 0; padding:0; list-style:none; } .warn-list li { color:#e3b341; font-size:13px; margin-top:4px; } .warn-list li::before { content:"⚠ "; }
+  svg.chart { display:block; width:100%; height:190px; }
+  .meta { display:flex; flex-wrap:wrap; gap:6px 14px; padding:6px 14px 12px; color:var(--muted); font-size:12.5px; } .meta b { color:var(--text); font-weight:600; }
+  .opts { display:grid; grid-template-columns:1fr 1fr; gap:8px; padding:0 14px 14px; }
+  .opt { border:1px solid var(--line); border-radius:10px; padding:8px 10px; font-size:13px; } .opt b { font-size:15px; } .opt span { color:var(--muted); display:block; font-size:12px; }
+  .panel { background:var(--panel); border:1px solid var(--line); border-radius:14px; padding:12px 14px; }
+  .panel h3 { margin:0 0 8px; font-size:15px; display:flex; gap:8px; align-items:center; } .panel h3 a { margin-left:auto; font-size:12px; color:var(--blue); font-weight:500; }
+  table { width:100%; border-collapse:collapse; font-size:13px; } th, td { text-align:left; padding:7px 6px; border-bottom:1px solid var(--line); } th { color:var(--muted); font-weight:500; font-size:12px; }
+  td.r, th.r { text-align:right; }
+  .empty { color:var(--muted); font-size:13px; padding:6px 0; }
+  .notice { background:var(--amber-soft); color:#e3b341; border-radius:10px; padding:9px 12px; font-size:13px; }
+  .demo { background:#1d2a44; color:#9cc0ff; }
+  button { white-space:nowrap; background:#21262d; color:var(--text); border:1px solid var(--line); border-radius:8px; padding:6px 10px; font:inherit; font-size:13px; cursor:pointer; }
+  footer { text-align:center; color:var(--muted); font-size:12px; padding:0 16px 30px; }
+  @media (max-width: 760px) { .grid { grid-template-columns:1fr; } .summary { grid-template-columns:1fr 1fr; } .price b { font-size:24px; } .hide-sm { display:none; } }
+</style>
+</head>
+<body>
+<header>
+  <h1>MarketPilot</h1><span class="pill" id="mode">MCX</span>
+  <span class="sp"></span>
+  <span class="pill" id="feed"><span class="dot"></span>Connecting…</span>
+  <button id="alerts" title="Sound and pop-up alerts on this device">🔔 Alerts</button>
+</header>
+<main>
+  <div id="banner"></div>
+  <section class="summary">
+    <div class="kpi"><span>Today's paper P&amp;L</span><b id="pnl">—</b></div>
+    <div class="kpi"><span>Trades today</span><b id="trades">—</b></div>
+    <div class="kpi"><span>Max loss / trade</span><b id="maxloss">—</b></div>
+    <div class="kpi"><span>Daily loss limit left</span><b id="dailyleft">—</b></div>
+  </section>
+  <section class="grid" id="products"></section>
+  <section class="panel"><h3>Signals</h3><div id="signals"></div></section>
+  <section class="panel"><h3>Paper results <a href="/api/trades.csv">Download CSV</a></h3><div id="closed"></div></section>
+</main>
+<footer>Signals and paper tracking only — orders are placed by you in the Angel One app. Estimated option levels assume delta ≈ 0.5. Past or paper results do not guarantee future profit.</footer>
+<script>
+const $ = id => document.getElementById(id);
+const money = n => n == null || !isFinite(n) ? "—" : (n < 0 ? "−₹" : "₹") + Math.abs(n).toLocaleString("en-IN", { maximumFractionDigits: 0 });
+const num = (n, d = 2) => n == null || !isFinite(n) ? "—" : Number(n).toLocaleString("en-IN", { maximumFractionDigits: d });
+const ist = ms => ms ? new Date(ms).toLocaleTimeString("en-IN", { timeZone: "Asia/Kolkata", hour: "2-digit", minute: "2-digit", hour12: false }) : "—";
+const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+let seen = null, alertsOn = localStorage.getItem("mp-alerts") === "1";
+
+function beep() {
+  try { const ctx = new AudioContext(), o = ctx.createOscillator(), g = ctx.createGain(); o.connect(g); g.connect(ctx.destination); o.frequency.value = 880; g.gain.value = .15; o.start(); setTimeout(() => { o.frequency.value = 1320; }, 160); setTimeout(() => { o.stop(); ctx.close(); }, 380); } catch {}
+}
+$("alerts").onclick = async () => {
+  alertsOn = !alertsOn; localStorage.setItem("mp-alerts", alertsOn ? "1" : "0");
+  if (alertsOn && "Notification" in window && Notification.permission === "default") await Notification.requestPermission();
+  if (alertsOn) beep(); paintAlerts();
+};
+function paintAlerts() { $("alerts").textContent = alertsOn ? "🔔 On" : "🔕 Off"; }
+paintAlerts();
+
+function chart(c, open) {
+  if (!c.length) return '<svg class="chart"></svg>';
+  const W = 600, H = 190, pad = 6, lv = open ? [open.stop, open.target, open.futuresEntry] : [];
+  const hi = Math.max(...c.map(x => x.high), ...lv), lo = Math.min(...c.map(x => x.low), ...lv), span = hi - lo || 1;
+  const y = v => pad + (hi - v) / span * (H - pad * 2), w = W / c.length;
+  let s = "";
+  c.forEach((k, i) => {
+    const x = i * w + w / 2, color = k.close >= k.open ? "#2ea043" : "#e5534b";
+    s += `<line x1="${x}" x2="${x}" y1="${y(k.high)}" y2="${y(k.low)}" stroke="${color}" stroke-width="1"/>`;
+    s += `<rect x="${x - w * .32}" width="${Math.max(1, w * .64)}" y="${Math.min(y(k.open), y(k.close))}" height="${Math.max(1, Math.abs(y(k.open) - y(k.close)))}" fill="${color}"/>`;
+  });
+  const line = (v, color, label) => v == null ? "" : `<line x1="0" x2="${W}" y1="${y(v)}" y2="${y(v)}" stroke="${color}" stroke-dasharray="5 4" stroke-width="1.2"/><text x="${W - 4}" y="${y(v) - 3}" fill="${color}" font-size="11" text-anchor="end">${label} ${num(v, 0)}</text>`;
+  if (open) s += line(open.target, "#56d364", "Target") + line(open.stop, "#ff7b72", "Stop") + line(open.futuresEntry, "#8b949e", "Entry");
+  return `<svg class="chart" viewBox="0 0 ${W} ${H}" preserveAspectRatio="none">${s}</svg>`;
+}
+
+function productCard(p, cfg) {
+  const change = p.price && p.prevClose ? p.price - p.prevClose : null;
+  const sig = p.lastSignal && p.lastSignal.status === "OPEN" ? p.lastSignal : null;
+  let box;
+  if (p.open) {
+    const o = p.open, plan = sig?.plan;
+    const title = o.kind === "OPTION" ? `HOLD · ${o.symbol}` : `HOLD · ${o.side} FUT`;
+    box = `<div class="signal ${o.side === "BUY" ? "buy" : "sell"}"><div class="act">${esc(title)}</div>
+      <p>Entered ${ist(o.entryTime)} at ${o.kind === "OPTION" ? "premium ₹" + num(o.entryPrice) : num(o.entryPrice)} · now ${o.kind === "OPTION" ? "₹" + num(o.mark) : num(o.mark)} · paper P&amp;L <b class="${(o.pnl ?? 0) >= 0 ? "up" : "down"}">${money(o.pnl)}</b></p>
+      <div class="levels"><div><span>Futures stop</span><b>${num(o.stop, 0)}</b></div><div><span>Futures target</span><b>${num(o.target, 0)}</b></div>
+      <div><span>${plan?.kind === "OPTION" ? "Premium SL / TGT" : "Est. loss at SL"}</span><b>${plan?.kind === "OPTION" ? `₹${num(plan.premiumStop, 1)} / ₹${num(plan.premiumTarget, 1)}` : money(plan?.estLoss)}</b></div></div>
+      ${(o.warnings || []).length ? `<ul class="warn-list">${o.warnings.map(w => `<li>${esc(w)}</li>`).join("")}</ul>` : ""}</div>`;
+  } else {
+    box = `<div class="signal"><div class="act">${p.status.ready ? "WAIT" : "WARMING UP"}</div><p>${esc(p.status.note)}</p></div>`;
+  }
+  const opts = p.options.map(o => `<div class="opt"><span>${o.type === "CE" ? "If BUY → " : "If SELL → "}${esc(o.symbol)}</span><b>₹${num(o.ltp, 1)}</b> <span>1 lot ≈ ${money(o.lotCost)}${o.lotCost > cfg.risk.capital ? " · above capital" : ""}</span></div>`).join("");
+  return `<article class="card">
+    <div class="card-head"><h2>${esc(p.label)}</h2><small>${esc(p.future.symbol)} · ${p.trade === "OPTIONS" ? "trades CE/PE" : "trades futures"}</small></div>
+    <div class="price"><b>${num(p.price, 0)}</b>${change != null ? `<span class="${change >= 0 ? "up" : "down"}">${change >= 0 ? "▲" : "▼"} ${num(Math.abs(change), 0)} (${num(change / p.prevClose * 100)}%)</span>` : ""}<span class="pill ${p.status.trend === "UPTREND" ? "ok" : p.status.trend === "DOWNTREND" ? "bad" : ""}">${esc(p.status.trend)}</span></div>
+    ${box}
+    ${chart(p.candles, p.open)}
+    <div class="meta"><span>EMA ${cfg.strategy.emaFast}/${cfg.strategy.emaSlow}/${cfg.strategy.emaTrend} <b>${num(p.status.emaFast, 0)} / ${num(p.status.emaSlow, 0)} / ${num(p.status.emaTrend, 0)}</b></span><span>RSI <b>${num(p.status.rsi, 1)}</b></span><span>ATR <b>${num(p.status.atr, 1)}</b></span><span>Options expiry <b>${p.optionExpiry ?? "—"}</b></span><span>Last tick <b>${ist(p.tickTime)}</b></span></div>
+    ${opts ? `<div class="opts">${opts}</div>` : ""}
+    ${p.notes.length ? `<div class="meta">${p.notes.map(n => `<span class="down">${esc(n)}</span>`).join("")}</div>` : ""}
+  </article>`;
+}
+
+function render(s) {
+  const age = s.feed.ageSeconds;
+  const f = $("feed");
+  f.className = "pill " + (age != null && age <= 15 ? "ok" : age != null && age <= 60 ? "warn" : "bad");
+  f.innerHTML = `<span class="dot"></span>${age == null ? "No data yet" : age <= 15 ? "Live" : `Data ${age}s old`}`;
+  $("mode").textContent = s.demo ? "DEMO" : "LIVE · MCX";
+  $("mode").className = "pill " + (s.demo ? "warn" : "ok");
+  $("banner").innerHTML = (s.demo ? `<div class="notice demo">DEMO mode — simulated prices at ${s.demoSpeed}× speed so you can see how signals look. Run <b>npm start</b> with your Angel One details for real data.</div>` : "")
+    + (s.feed.message ? `<div class="notice" style="margin-top:8px">${esc(s.feed.message)}</div>` : "");
+  $("pnl").textContent = money(s.day.pnl); $("pnl").className = s.day.pnl >= 0 ? "up" : "down";
+  $("trades").textContent = `${s.day.trades} / ${s.config.risk.maxTradesPerDay}`;
+  $("maxloss").textContent = money(s.config.risk.maxLossPerTrade);
+  const left = s.config.risk.dailyLossLimit + Math.min(0, s.day.pnl);
+  $("dailyleft").textContent = money(Math.max(0, left)); $("dailyleft").className = left <= 0 ? "down" : "";
+  $("products").innerHTML = s.products.map(p => productCard(p, s.config)).join("") || '<div class="empty">Loading instruments…</div>';
+  $("signals").innerHTML = s.signals.length ? `<table><tr><th>Time</th><th>Instrument</th><th>Signal</th><th class="hide-sm">Futures entry / SL / TGT</th><th class="r">Result</th></tr>${s.signals.map(x => `<tr><td>${ist(x.time)}</td><td>${esc(x.label)}</td><td class="${x.side === "BUY" ? "up" : "down"}">${esc(x.plan.action)}${x.plan.strike ? " " + num(x.plan.strike, 0) : ""}${x.plan.premium ? ` @ ₹${num(x.plan.premium, 1)}` : ""}</td><td class="hide-sm">${num(x.futures.price, 0)} / ${num(x.futures.stop, 0)} / ${num(x.futures.target, 0)}</td><td class="r ${x.result ? (x.result.pnl >= 0 ? "up" : "down") : ""}">${x.result ? money(x.result.pnl) : "open"}</td></tr>`).join("")}</table>` : '<div class="empty">No signals yet today. The desk only signals on a fresh EMA crossover in the trend direction.</div>';
+  $("closed").innerHTML = s.closed.length ? `<table><tr><th>Exit</th><th>Instrument</th><th>Trade</th><th class="hide-sm">Reason</th><th class="r">P&amp;L</th></tr>${s.closed.slice(0, 25).map(t => `<tr><td>${ist(t.exitTime)}</td><td>${esc(t.label)}</td><td>${esc(t.kind === "OPTION" ? t.symbol : t.side + " FUT")}</td><td class="hide-sm">${esc(t.reason)}</td><td class="r ${t.pnl >= 0 ? "up" : "down"}">${money(t.pnl)}</td></tr>`).join("")}</table>` : '<div class="empty">Closed paper trades appear here with their result after estimated costs.</div>';
+  const latest = s.signals[0]?.id ?? "";
+  if (seen !== null && latest && latest !== seen && alertsOn) {
+    const x = s.signals[0]; beep();
+    if ("Notification" in window && Notification.permission === "granted") new Notification(`${x.label}: ${x.plan.action}${x.plan.strike ? " " + x.plan.strike : ""}`, { body: `Futures ${num(x.futures.price, 0)} · SL ${num(x.futures.stop, 0)} · Target ${num(x.futures.target, 0)}` });
+  }
+  seen = latest;
+}
+
+function connect() {
+  const es = new EventSource("/api/events");
+  es.onmessage = e => { try { render(JSON.parse(e.data)); } catch (err) { console.error(err); } };
+  es.onerror = () => { $("feed").className = "pill bad"; $("feed").innerHTML = '<span class="dot"></span>Reconnecting…'; };
+}
+connect();
+</script>
+</body>
+</html>

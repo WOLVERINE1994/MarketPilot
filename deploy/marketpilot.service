@@ -1,0 +1,23 @@
+[Unit]
+Description=MarketPilot MCX signal desk
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=marketpilot
+WorkingDirectory=/opt/marketpilot
+ExecStart=/usr/bin/node src/main.js
+Restart=always
+RestartSec=10
+Environment=NODE_ENV=production
+# Hardening: the app can only write to its data folder.
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/opt/marketpilot/data
+
+[Install]
+WantedBy=multi-user.target

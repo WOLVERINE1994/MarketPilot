@@ -79,7 +79,7 @@ export class SmartApiClient {
     return body.data;
   }
 
-  /** MCX rows for the configured products, cached on disk once per IST day. */
+  /** Instrument rows (futures, options, index rows) for the configured products, cached on disk once per IST day. */
   async instruments(productKeys) {
     const file = path.join(this.dataDir, "instruments.json");
     try {
@@ -89,21 +89,24 @@ export class SmartApiClient {
     const res = await this.fetch(MASTER_URL, { signal: AbortSignal.timeout(180000) });
     if (!res.ok) throw new SmartApiError(`Instrument master download failed: ${res.status}`);
     const all = await res.json();
-    const rows = all.filter(r => r.exch_seg === "MCX" && productKeys.includes(r.name));
+    const rows = all.filter(r => productKeys.includes(r.name) && (["MCX", "NFO", "BFO"].includes(r.exch_seg) || r.instrumenttype === "AMXIDX"));
     await mkdir(this.dataDir, { recursive: true });
     await writeFile(file, JSON.stringify({ day: istDay(Date.now()), products: productKeys, rows }));
     return rows;
   }
 
-  /** FULL quotes (LTP, depth, volume) for up to 50 MCX tokens. */
-  async quotes(tokens) {
+  /** FULL quotes (LTP, depth, volume). `instruments` = [{ exch, token }]; result keyed by "EXCH|token". */
+  async quotes(instruments) {
     const out = new Map();
-    for (let i = 0; i < tokens.length; i += 50) {
-      const data = await this.post("/rest/secure/angelbroking/market/v1/quote/", { mode: "FULL", exchangeTokens: { MCX: tokens.slice(i, i + 50) } }, { timeout: 8000 });
+    for (let i = 0; i < instruments.length; i += 50) {
+      const exchangeTokens = {};
+      for (const inst of instruments.slice(i, i + 50)) (exchangeTokens[inst.exch] ??= []).push(inst.token);
+      const data = await this.post("/rest/secure/angelbroking/market/v1/quote/", { mode: "FULL", exchangeTokens }, { timeout: 8000 });
       for (const row of data?.fetched ?? []) {
         const bid = row.depth?.buy?.find(l => l.price > 0)?.price ?? null;
         const ask = row.depth?.sell?.find(l => l.price > 0)?.price ?? null;
-        out.set(String(row.symbolToken), { token: String(row.symbolToken), ltp: Number(row.ltp), bid, ask, volume: Number(row.tradeVolume ?? 0), oi: Number(row.opnInterest ?? 0), time: parseFeedTime(row.exchFeedTime) ?? Date.now() });
+        const exch = row.exchange, token = String(row.symbolToken);
+        out.set(`${exch}|${token}`, { key: `${exch}|${token}`, exch, token, ltp: Number(row.ltp), bid, ask, volume: Number(row.tradeVolume ?? 0), oi: Number(row.opnInterest ?? 0), prevClose: Number(row.close) || null, time: parseFeedTime(row.exchFeedTime) ?? Date.now() });
       }
     }
     return out;
@@ -113,12 +116,12 @@ export class SmartApiClient {
    * Historical 1-minute candles. SmartAPI allows about 30 days of ONE_MINUTE
    * data per request, so longer ranges are fetched in chunks.
    */
-  async candles(token, fromMs, toMs, interval = "ONE_MINUTE") {
+  async candles(inst, fromMs, toMs, interval = "ONE_MINUTE") {
     const chunk = 25 * 86400000, result = [];
     for (let start = fromMs; start < toMs; start += chunk) {
       const end = Math.min(toMs, start + chunk);
       const data = await this.post("/rest/secure/angelbroking/historical/v1/getCandleData", {
-        exchange: "MCX", symboltoken: token, interval, fromdate: smartApiDate(start), todate: smartApiDate(end),
+        exchange: inst.exch, symboltoken: inst.token, interval, fromdate: smartApiDate(start), todate: smartApiDate(end),
       }, { timeout: 30000 });
       for (const [t, o, h, l, c, v] of data ?? []) result.push({ time: Date.parse(t), open: +o, high: +h, low: +l, close: +c, volume: +v || 0 });
       if (toMs - fromMs > chunk) await new Promise(r => setTimeout(r, 400)); // stay under rate limits

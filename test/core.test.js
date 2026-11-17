@@ -34,7 +34,7 @@ function packet({ mode = 3, token = "449534", time = 1794800000000, ltp = 9123.4
 
 test("parses SmartAPI V2 LTP and Snap Quote packets (paise → rupees)", () => {
   const snap = parsePacket(packet({}));
-  assert.equal(snap.token, "449534"); assert.equal(snap.ltp, 9123.45); assert.equal(snap.time, 1794800000000);
+  assert.equal(snap.token, "449534"); assert.equal(snap.exch, "MCX"); assert.equal(snap.key, "MCX|449534"); assert.equal(snap.ltp, 9123.45); assert.equal(snap.time, 1794800000000);
   assert.equal(snap.volume, 1500); assert.equal(snap.bid, 9123); assert.equal(snap.ask, 9124); assert.equal(snap.prevClose, 9100);
   const ltp = parsePacket(packet({ mode: 1 }).buffer.slice(0, 51));
   assert.equal(ltp.ltp, 9123.45); assert.equal(ltp.bid, undefined);
@@ -93,16 +93,41 @@ const masterRows = [
 test("selects the nearest non-expiring option chain and the future it settles into", () => {
   const sel = selectContracts(masterRows, PRODUCTS.SILVERM, "2026-11-16");
   assert.equal(sel.optionExpiry, "2026-11-24"); // expiry-day chain (16 Nov) skipped
-  assert.equal(sel.future.symbol, "SILVERM27NOV26FUT");
+  assert.equal(sel.underlying.symbol, "SILVERM27NOV26FUT"); assert.equal(sel.underlying.exch, "MCX"); assert.equal(sel.multiplier, 5);
+  assert.equal(selectContracts(masterRows, PRODUCTS.SILVERM, "2026-11-16", { skipExpiryDay: false }).optionExpiry, "2026-11-16");
   assert.equal(sel.chain.length, 10);
-  assert.equal(sel.chain[0].strike, 214000); assert.equal(sel.chain[0].tickSize, 0.5); assert.equal(sel.future.tickSize, 1);
+  assert.equal(sel.chain[0].strike, 214000); assert.equal(sel.chain[0].tickSize, 0.5); assert.equal(sel.underlying.tickSize, 1);
   assert.equal(pickOption(sel.chain, 216300, "BUY").symbol, "SILVERM24NOV26216000CE");
   assert.equal(pickOption(sel.chain, 216300, "SELL").symbol, "SILVERM24NOV26216000PE");
   assert.equal(pickOption(sel.chain, 216300, "BUY", "ITM1").strike, 215000);
   assert.equal(pickOption(sel.chain, 216300, "SELL", "ITM1").strike, 217000);
   assert.equal(pickOption(sel.chain, 216300, "BUY", "OTM1").strike, 217000);
   assert.equal(nearbyOptions(sel.chain, 216300, 1).length, 6);
-  assert.equal(selectContracts(masterRows, PRODUCTS.CRUDEOILM, "2026-11-16").future, null);
+  assert.equal(selectContracts(masterRows, PRODUCTS.CRUDEOILM, "2026-11-16").underlying, null);
+});
+
+// Index rows as they appear in Angel One's instrument list (strike and tick in paise).
+const indexRows = [
+  { exch_seg: "NSE", name: "NIFTY", symbol: "Nifty 50", token: "99926000", expiry: "", lotsize: "1", tick_size: "0.000000", instrumenttype: "AMXIDX", strike: "0.000000" },
+  ...[25300, 25350, 25400, 25450].flatMap((k, i) => ["CE", "PE"].map((t, j) => ({ exch_seg: "NFO", name: "NIFTY", symbol: `NIFTY24NOV26${k}${t}`, token: String(40000 + i * 2 + j), expiry: "24NOV2026", lotsize: "65", tick_size: "5.000000", instrumenttype: "OPTIDX", strike: `${k * 100}.000000` }))),
+  { exch_seg: "NFO", name: "NIFTY", symbol: "NIFTY17NOV2625400CE", token: "39999", expiry: "17NOV2026", lotsize: "65", tick_size: "5.000000", instrumenttype: "OPTIDX", strike: "2540000.000000" },
+  { exch_seg: "NFO", name: "NIFTY", symbol: "NIFTY24NOV26FUT", token: "38888", expiry: "24NOV2026", lotsize: "65", tick_size: "10.000000", instrumenttype: "FUTIDX", strike: "-1" },
+  { exch_seg: "BFO", name: "SENSEX", symbol: "SENSEX19NOV2682300CE", token: "1100", expiry: "19NOV2026", lotsize: "20", tick_size: "5.000000", instrumenttype: "OPTIDX", strike: "8230000.000000" },
+  { exch_seg: "BFO", name: "SENSEX", symbol: "SENSEX19NOV2682300PE", token: "1101", expiry: "19NOV2026", lotsize: "20", tick_size: "5.000000", instrumenttype: "OPTIDX", strike: "8230000.000000" },
+];
+
+test("index products: spot index as the chart, weekly OPTIDX chain, lot size from the contracts", () => {
+  const n = selectContracts(indexRows, PRODUCTS.NIFTY, "2026-11-17"); // Tuesday = Nifty weekly expiry day
+  assert.deepEqual([n.underlying.exch, n.underlying.token, n.underlying.symbol], ["NSE", "99926000", "Nifty 50"]);
+  assert.equal(n.optionExpiry, "2026-11-24"); // today's expiry skipped by default
+  assert.equal(n.chain.length, 8); assert.equal(n.multiplier, 65);
+  assert.equal(n.chain[0].exch, "NFO"); assert.equal(n.chain[0].tickSize, 0.05); assert.equal(n.chain[0].strike, 25300);
+  assert.equal(pickOption(n.chain, 25391.4, "BUY").symbol, "NIFTY24NOV2625400CE");
+  assert.equal(pickOption(n.chain, 25391.4, "SELL").symbol, "NIFTY24NOV2625400PE");
+  // Sensex options live on BFO; the spot token falls back to the known BSE index token when the row is missing.
+  const sx = selectContracts(indexRows, PRODUCTS.SENSEX, "2026-11-17");
+  assert.deepEqual([sx.underlying.exch, sx.underlying.token], ["BSE", "99919000"]);
+  assert.equal(sx.chain[0].exch, "BFO"); assert.equal(sx.multiplier, 20);
 });
 
 test("trade plan estimates option stop/target from futures levels and warns without blocking", () => {
@@ -116,6 +141,11 @@ test("trade plan estimates option stop/target from futures levels and warns with
   const fut = planTrade({ product: PRODUCTS.CRUDEOILM, entry: { side: "SELL", price: 9200, stop: 9240, target: 9120 }, risk: cfg, day: { pnl: -1600, trades: 1 } });
   assert.equal(fut.action, "SELL FUT"); assert.equal(fut.estLoss, 400 + cfg.costPerTrade); assert.equal(fut.estProfit, 800 - cfg.costPerTrade);
   assert.ok(fut.warnings.some(w => w.includes("Daily loss limit")));
+  // Index option: P&L per point = lot size from the contract.
+  const nifty = planTrade({ product: PRODUCTS.NIFTY, multiplier: 65, entry: { side: "BUY", price: 25400, stop: 25370, target: 25460 }, risk: cfg,
+    option: { symbol: "NIFTY24NOV2625400CE", token: "40004", exch: "NFO", strike: 25400, type: "CE", tickSize: 0.05 }, premium: 120.35 });
+  assert.equal(nifty.lotSize, 65); assert.equal(nifty.premiumStop, 105.35); assert.equal(nifty.premiumTarget, 150.35);
+  assert.equal(nifty.outlay, 7822.75); assert.equal(nifty.estLoss, 975 + cfg.costPerTrade); assert.equal(nifty.exch, "NFO");
   const noPremium = planTrade({ product: PRODUCTS.SILVERM, entry, risk: cfg, option });
   assert.ok(noPremium.warnings[0].includes("premium not received"));
 });

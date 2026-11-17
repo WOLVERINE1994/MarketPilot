@@ -31,14 +31,20 @@ class FakeFeed {
   async contracts() { return rows; }
   async history() { return this.history1m; }
   subscribe(tokens) { tokens.forEach(t => this.subs.add(t)); }
-  async quotes(tokens) { return new Map(tokens.filter(t => this.premiums.has(t)).map(t => [t, { token: t, ...this.premiums.get(t), time: this.t }])); }
+  async quotes(insts) { return new Map(insts.map(i => `${i.exch}|${i.token}`).filter(k => this.premiums.has(k)).map(k => [k, { key: k, ...this.premiums.get(k), time: this.t }])); }
 }
 
-function setup(extraEnv = {}) {
+const niftyRows = [
+  { exch_seg: "NSE", name: "NIFTY", symbol: "Nifty 50", token: "99926000", expiry: "", lotsize: "1", tick_size: "0", instrumenttype: "AMXIDX", strike: "0" },
+  ...[99, 100, 101, 102].flatMap((k, i) => ["CE", "PE"].map((t, j) => ({ exch_seg: "NFO", name: "NIFTY", symbol: `NIFTY24NOV26${k}${t}`, token: String(10 + i * 2 + j), expiry: "24NOV2026", lotsize: "65", tick_size: "5", instrumenttype: "OPTIDX", strike: String(k * 100) }))),
+];
+
+function setup(extraEnv = {}, contractRows = rows) {
   const c = closes(), entryIndex = 77; // the candle that produces the BUY (see strategy tests)
   const history = [];
   for (let i = 0; i < entryIndex; i++) for (let m = 0; m < 5; m++) history.push({ time: T0 + i * FIVE + m * 60000, open: c[i] - 0.1, high: c[i] + 0.3, low: c[i] - 0.3, close: c[i], volume: 1 });
   const feed = new FakeFeed(history);
+  feed.contracts = async () => contractRows;
   feed.t = T0 + entryIndex * FIVE + 1000;
   const config = readConfig({ PRODUCTS: "CRUDEOILM", MARKETPILOT_DATA_DIR: mkdtempSync(path.join(tmpdir(), "mp-")), ...extraEnv });
   const sent = [];
@@ -51,9 +57,9 @@ function setup(extraEnv = {}) {
 test("desk turns a candle-close signal into a CE plan, alert, paper trade and priced exit", async () => {
   const { desk, feed, sent, price, entryIndex } = setup();
   await desk.start(); desk.stop();
-  assert.ok(feed.subs.has("1"), "futures token subscribed");
-  feed.premiums.set("14", { ltp: 0.8, bid: 0.75, ask: 0.85 }); // 101 CE (nearest strike to 100.9)
-  desk.onTick({ token: "1", ltp: price, time: feed.t, volume: 100 });
+  assert.ok(feed.subs.has("MCX|1"), "futures token subscribed");
+  feed.premiums.set("MCX|14", { ltp: 0.8, bid: 0.75, ask: 0.85 }); // 101 CE (nearest strike to 100.9)
+  desk.onTick({ key: "MCX|1", ltp: price, time: feed.t, volume: 100 });
   feed.t = T0 + (entryIndex + 1) * FIVE + 10;
   desk.housekeeping();
   await desk.products.get("CRUDEOILM").queue;
@@ -61,13 +67,13 @@ test("desk turns a candle-close signal into a CE plan, alert, paper trade and pr
   const sig = desk.signals[0];
   assert.equal(sig.side, "BUY"); assert.equal(sig.plan.kind, "OPTION"); assert.equal(sig.plan.action, "BUY CE");
   assert.equal(sig.plan.symbol, "CRUDEOILM16DEC26101CE"); assert.equal(sig.plan.premium, 0.85);
-  assert.match(sent[0], /Crude Oil Mini: BUY CE 101 CE — 1 lot/);
+  assert.match(sent[0], /Crude Oil Mini: BUY CE 101 — 1 lot \(10 qty\)/);
   assert.match(sent[0], /SL .* Target/);
   assert.equal(desk.open.length, 1);
   // Price falls through the stop → exit, priced at the option bid.
   feed.t += 30000;
-  desk.onTick({ token: "14", ltp: 0.5, bid: 0.45, ask: 0.55, time: feed.t }); // streamed option quote
-  desk.onTick({ token: "1", ltp: sig.futures.stop - 0.5, time: feed.t, volume: 120 });
+  desk.onTick({ key: "MCX|14", ltp: 0.5, bid: 0.45, ask: 0.55, time: feed.t }); // streamed option quote
+  desk.onTick({ key: "MCX|1", ltp: sig.futures.stop - 0.5, time: feed.t, volume: 120 });
   await desk.products.get("CRUDEOILM").queue;
   assert.equal(desk.open.length, 0);
   const closed = desk.closed.at(-1);
@@ -82,10 +88,34 @@ test("desk turns a candle-close signal into a CE plan, alert, paper trade and pr
   assert.equal(snap.day.trades, 1); assert.equal(snap.products[0].action, "WAIT");
 });
 
+test("index desk: Nifty signal buys an NFO CE, sizes P&L by the 65 lot and squares off at the index cut-off", async () => {
+  // Widen the index session so the synthetic series (which runs into the evening) can trade.
+  const { desk, feed, sent, price, entryIndex } = setup({ PRODUCTS: "NIFTY", INDEX_ENTRY_END: "22:00", INDEX_SQUARE_OFF: "22:30" }, niftyRows);
+  await desk.start(); desk.stop();
+  assert.ok(feed.subs.has("NSE|99926000"), "spot index subscribed");
+  assert.ok(feed.subs.has("NFO|14"), "nearby NFO options subscribed");
+  feed.premiums.set("NFO|14", { ltp: 1.2, bid: 1.15, ask: 1.25 });
+  desk.onTick({ key: "NSE|99926000", ltp: price, time: feed.t });
+  feed.t = T0 + (entryIndex + 1) * FIVE + 10;
+  desk.housekeeping();
+  await desk.products.get("NIFTY").queue;
+  const sig = desk.signals[0];
+  assert.equal(sig.plan.action, "BUY CE"); assert.equal(sig.plan.symbol, "NIFTY24NOV26101CE"); assert.equal(sig.plan.lotSize, 65);
+  assert.equal(sig.plan.outlay, Math.round(1.25 * 65 * 100) / 100);
+  assert.match(sent[0], /Nifty 50: BUY CE 101 — 1 lot \(65 qty\)/);
+  desk.onTick({ key: "NFO|14", ltp: 1.6, bid: 1.55, ask: 1.65, time: feed.t + 1000 });
+  desk.onTick({ key: "NSE|99926000", ltp: price + 0.1, time: istToMs("2026-11-16", "22:31") });
+  await desk.products.get("NIFTY").queue;
+  const closed = desk.closed.at(-1);
+  assert.equal(closed.reason, "Intraday square-off time");
+  assert.equal(closed.pnl, Math.round(((1.55 - 1.25) * 65 - 60) * 100) / 100);
+  assert.equal(desk.snapshot().products[0].session.squareOff, "22:30");
+});
+
 test("futures mode for crude produces a futures plan and futures P&L", async () => {
   const { desk, feed, price, entryIndex } = setup({ CRUDE_TRADE: "FUTURES" });
   await desk.start(); desk.stop();
-  desk.onTick({ token: "1", ltp: price, time: feed.t });
+  desk.onTick({ key: "MCX|1", ltp: price, time: feed.t });
   feed.t = T0 + (entryIndex + 1) * FIVE + 10;
   desk.housekeeping();
   await desk.products.get("CRUDEOILM").queue;
@@ -93,7 +123,7 @@ test("futures mode for crude produces a futures plan and futures P&L", async () 
   assert.equal(sig.plan.action, "BUY FUT");
   assert.equal(sig.alternative.action, "BUY CE");
   feed.t += 60000;
-  desk.onTick({ token: "1", ltp: sig.futures.target + 1, time: feed.t });
+  desk.onTick({ key: "MCX|1", ltp: sig.futures.target + 1, time: feed.t });
   await desk.products.get("CRUDEOILM").queue;
   const closed = desk.closed.at(-1);
   assert.equal(closed.reason, "Target hit");
@@ -158,26 +188,30 @@ test("SmartAPI client logs in with TOTP, re-logs in on an expired token and pars
     return { ok: false, status: 404, json: async () => ({}) };
   };
   const client = new SmartApiClient({ apiKey: "k", clientCode: "C1", pin: "1234", totpSecret: "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ" }, { fetchImpl, dataDir: tmpdir() });
-  const candles = await client.candles("1", istToMs("2026-11-16", "09:00"), istToMs("2026-11-16", "10:00"));
+  const candles = await client.candles({ exch: "NSE", token: "99926000" }, istToMs("2026-11-16", "09:00"), istToMs("2026-11-16", "10:00"));
   assert.equal(logins, 2); // first login, then again after AG8001
   assert.equal(candles.length, 2); assert.equal(candles[1].close, 9118);
   const login = calls.find(c => c.url.includes("loginByPassword"));
   assert.equal(login.body.clientcode, "C1"); assert.match(login.body.totp, /^\d{6}$/);
   const hist = calls.filter(c => c.url.includes("getCandleData")).at(-1);
   assert.equal(hist.headers.Authorization, "Bearer jwt2");
-  assert.deepEqual([hist.body.fromdate, hist.body.todate, hist.body.exchange], ["2026-11-16 09:00", "2026-11-16 10:00", "MCX"]);
+  assert.deepEqual([hist.body.fromdate, hist.body.todate, hist.body.exchange, hist.body.symboltoken], ["2026-11-16 09:00", "2026-11-16 10:00", "NSE", "99926000"]);
   const noCreds = new SmartApiClient({ apiKey: "", clientCode: "", pin: "" }, { fetchImpl, dataDir: tmpdir() });
   await assert.rejects(noCreds.login(), /credentials missing/);
 });
 
-test("demo feed produces a working desk with option premiums for both products", async () => {
+test("demo feed produces a working desk with option premiums for every product", async () => {
   const feed = new DemoFeed({ speed: 1 });
-  const config = readConfig({ MARKETPILOT_DATA_DIR: mkdtempSync(path.join(tmpdir(), "mp-")) });
+  const all = "CRUDEOILM,SILVERM,NIFTY,BANKNIFTY,FINNIFTY,MIDCPNIFTY,SENSEX,BANKEX";
+  const config = readConfig({ PRODUCTS: all, MARKETPILOT_DATA_DIR: mkdtempSync(path.join(tmpdir(), "mp-")) });
   const desk = new Desk(config, feed, { journal: new Journal(config.dataDir), notifier: new Notifier({}, { log: () => {} }) });
   await desk.start(); desk.stop();
   const snap = desk.snapshot();
-  assert.deepEqual(snap.products.map(p => p.key), ["CRUDEOILM", "SILVERM"]);
-  for (const p of snap.products) { assert.ok(p.status.ready); assert.ok(p.price > 0); }
-  const q = await feed.quotes([[...feed.optionMeta.keys()][15]]);
+  assert.deepEqual(snap.products.map(p => p.key), all.split(","));
+  for (const p of snap.products) { assert.ok(p.status.ready, p.key); assert.ok(p.price > 0, p.key); assert.ok(p.lotSize > 0, p.key); }
+  assert.deepEqual(snap.products.filter(p => p.kind === "INDEX").map(p => p.lotSize), [65, 30, 60, 120, 20, 30]);
+  assert.equal(snap.products.find(p => p.key === "SENSEX").session.squareOff, "15:15");
+  const [k] = feed.optionMeta.keys(); const [exch, token] = k.split("|");
+  const q = await feed.quotes([{ exch, token }]);
   assert.ok([...q.values()][0].ltp > 0);
 });

@@ -1,5 +1,7 @@
 const STREAM_URL = "wss://smartapisocket.angelone.in/smart-stream";
-const MCX = 5;
+/** SmartAPI WebSocket exchange-type codes. */
+export const EXCHANGE_TYPES = { NSE: 1, NFO: 2, BSE: 3, BFO: 4, MCX: 5, NCDEX: 7, CDS: 13 };
+const EXCHANGE_NAMES = Object.fromEntries(Object.entries(EXCHANGE_TYPES).map(([k, v]) => [v, k]));
 
 /**
  * Parse one SmartAPI WebSocket V2 binary packet (little-endian).
@@ -14,7 +16,8 @@ export function parsePacket(data) {
   const time = Number(buf.readBigInt64LE(35));
   const ltp = Number(buf.readBigInt64LE(43)) / 100;
   if (!/^\d+$/.test(token) || !(ltp > 0) || !(time > 0)) return null;
-  const tick = { token, exchange: buf[1], mode, time, ltp };
+  const exch = EXCHANGE_NAMES[buf[1]] ?? String(buf[1]);
+  const tick = { key: `${exch}|${token}`, exch, token, mode, time, ltp };
   if (mode >= 2 && buf.length >= 123) {
     tick.volume = Number(buf.readBigInt64LE(67));
     tick.open = Number(buf.readBigInt64LE(91)) / 100;
@@ -35,7 +38,7 @@ export function parsePacket(data) {
   return tick;
 }
 
-/** Reconnecting SmartAPI market-data stream. Calls onTick(tick) for every packet. */
+/** Reconnecting SmartAPI market-data stream. Subscribes by "EXCH|token" keys; calls onTick(tick) for every packet. */
 export class SmartStream {
   constructor({ apiKey, clientCode, getFeedToken, onTick, onStatus = () => {}, WebSocketImpl = globalThis.WebSocket }) {
     Object.assign(this, { apiKey, clientCode, getFeedToken, onTick, onStatus, WebSocketImpl });
@@ -47,15 +50,20 @@ export class SmartStream {
   start() { this.stopped = false; this.open(); }
   stop() { this.stopped = true; clearInterval(this.ping); clearTimeout(this.reconnect); this.socket?.close(); this.socket = null; }
 
-  subscribe(tokens) {
-    const fresh = tokens.filter(t => /^\d+$/.test(t) && !this.tokens.has(t));
-    fresh.forEach(t => this.tokens.add(t));
+  /** `keys` like "NFO|43650". */
+  subscribe(keys) {
+    const fresh = keys.filter(k => /^[A-Z]+\|\d+$/.test(k) && EXCHANGE_TYPES[k.split("|")[0]] && !this.tokens.has(k));
+    fresh.forEach(k => this.tokens.add(k));
     if (fresh.length && this.connected) this.send(fresh);
   }
 
-  send(tokens) {
-    for (let i = 0; i < tokens.length; i += 100) {
-      this.socket.send(JSON.stringify({ correlationID: "mpilot", action: 1, params: { mode: 3, tokenList: [{ exchangeType: MCX, tokens: tokens.slice(i, i + 100) }] } }));
+  send(keys) {
+    const byExchange = new Map();
+    for (const k of keys) { const [exch, token] = k.split("|"); const type = EXCHANGE_TYPES[exch]; if (!byExchange.has(type)) byExchange.set(type, []); byExchange.get(type).push(token); }
+    for (const [exchangeType, tokens] of byExchange) {
+      for (let i = 0; i < tokens.length; i += 100) {
+        this.socket.send(JSON.stringify({ correlationID: "mpilot", action: 1, params: { mode: 3, tokenList: [{ exchangeType, tokens: tokens.slice(i, i + 100) }] } }));
+      }
     }
   }
 

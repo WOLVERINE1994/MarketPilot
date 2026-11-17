@@ -2,22 +2,28 @@ import { existsSync } from "node:fs";
 import path from "node:path";
 
 /**
- * Instruments this desk understands. `multiplier` is rupees of P&L per one-rupee
- * price move for one lot (MCX quotes Crude Mini per barrel x 10 barrels and
- * Silver Mini per kg x 5 kg). The instrument master's lot size is cross-checked
- * against `lot` at runtime and a warning is shown if MCX ever changes it.
+ * Instruments this desk understands.
+ *
+ * COMMODITY (MCX): direction from the futures chart; `multiplier` is rupees of
+ * P&L per one-rupee move for one lot (Crude Mini 10 barrels, Silver Mini 5 kg).
+ *
+ * INDEX (NSE/BSE): direction from the spot index; trades are CE/PE buys. The
+ * lot size (= multiplier) is read from each option contract in Angel One's
+ * instrument list, because exchanges revise index lot sizes regularly.
+ * `spotToken` is the usual Angel One index token, used only if the instrument
+ * list doesn't contain the index row.
  */
 export const PRODUCTS = {
-  CRUDEOILM: {
-    key: "CRUDEOILM", label: "Crude Oil Mini", unit: "barrel", lot: 10, multiplier: 10,
-    futures: true, options: true,
-  },
-  SILVERM: {
-    key: "SILVERM", label: "Silver Mini", unit: "kg", lot: 5, multiplier: 5,
-    // Silver Mini futures need ~₹1.5 lakh margin, so for a small account the
-    // futures chart is the direction reference and trades are CE/PE buys.
-    futures: false, options: true,
-  },
+  CRUDEOILM: { key: "CRUDEOILM", label: "Crude Oil Mini", kind: "COMMODITY", exch: "MCX", optionExch: "MCX", unit: "barrel", lot: 10, multiplier: 10, futures: true, options: true },
+  // Silver Mini futures need ~₹1.5 lakh margin, so the futures chart is the
+  // direction reference and trades are CE/PE buys.
+  SILVERM: { key: "SILVERM", label: "Silver Mini", kind: "COMMODITY", exch: "MCX", optionExch: "MCX", unit: "kg", lot: 5, multiplier: 5, futures: false, options: true },
+  NIFTY: { key: "NIFTY", label: "Nifty 50", kind: "INDEX", exch: "NSE", optionExch: "NFO", spotToken: "99926000", futures: false, options: true },
+  BANKNIFTY: { key: "BANKNIFTY", label: "Bank Nifty", kind: "INDEX", exch: "NSE", optionExch: "NFO", spotToken: "99926009", futures: false, options: true },
+  FINNIFTY: { key: "FINNIFTY", label: "Fin Nifty", kind: "INDEX", exch: "NSE", optionExch: "NFO", spotToken: "99926037", futures: false, options: true },
+  MIDCPNIFTY: { key: "MIDCPNIFTY", label: "Midcap Nifty", kind: "INDEX", exch: "NSE", optionExch: "NFO", spotToken: "99926074", futures: false, options: true },
+  SENSEX: { key: "SENSEX", label: "Sensex", kind: "INDEX", exch: "BSE", optionExch: "BFO", spotToken: "99919000", futures: false, options: true },
+  BANKEX: { key: "BANKEX", label: "Bankex", kind: "INDEX", exch: "BSE", optionExch: "BFO", spotToken: "99919012", futures: false, options: true },
 };
 
 const num = (value, fallback) => {
@@ -31,7 +37,7 @@ export function loadEnv(file = path.join(process.cwd(), ".env")) {
 }
 
 export function readConfig(env = process.env) {
-  const products = (env.PRODUCTS || "CRUDEOILM,SILVERM").split(",").map(s => s.trim().toUpperCase()).filter(k => PRODUCTS[k]);
+  const products = (env.PRODUCTS || "CRUDEOILM,SILVERM,NIFTY,BANKNIFTY,SENSEX").split(",").map(s => s.trim().toUpperCase()).filter(k => PRODUCTS[k]);
   return {
     angel: {
       apiKey: env.ANGEL_API_KEY?.trim() || "",
@@ -59,10 +65,19 @@ export function readConfig(env = process.env) {
       atrStop: num(env.ATR_STOP, 1.5),
       riskReward: num(env.RISK_REWARD, 2),
       breakevenAtR: num(env.BREAKEVEN_AT_R, 1),
+      // MCX commodity session (IST)
       entryStart: time(env.ENTRY_START, "09:15"),
       entryEnd: time(env.ENTRY_END, "22:45"),
       squareOff: time(env.SQUARE_OFF, "23:15"),
     },
+    // NSE/BSE index session (IST): skip the opening 15 minutes, no new entries in the last 45, square off 15:15.
+    indexSession: {
+      entryStart: time(env.INDEX_ENTRY_START, "09:30"),
+      entryEnd: time(env.INDEX_ENTRY_END, "14:45"),
+      squareOff: time(env.INDEX_SQUARE_OFF, "15:15"),
+    },
+    // Skip options on their expiry day (default): expiry-day premiums decay extremely fast.
+    skipExpiryDay: !/^(0|false|no)$/i.test(env.SKIP_EXPIRY_DAY ?? ""),
     // Crude can be traded as Mini futures or as CE/PE; silver is always CE/PE.
     crudeTrade: (env.CRUDE_TRADE || "OPTIONS").toUpperCase() === "FUTURES" ? "FUTURES" : "OPTIONS",
     optionStrike: ["ATM", "ITM1", "OTM1"].includes((env.OPTION_STRIKE || "").toUpperCase()) ? env.OPTION_STRIKE.toUpperCase() : "ATM",

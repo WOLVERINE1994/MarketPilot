@@ -1,6 +1,6 @@
-# MarketPilot — MCX intraday signal desk
+# MarketPilot — intraday CE/PE signal desk (MCX + NSE/BSE indices)
 
-MarketPilot watches **Crude Oil Mini** and **Silver Mini** on MCX through your Angel One SmartAPI account. It tells you when to **BUY CE**, **BUY PE** or **EXIT**, with the strike, premium, stop-loss and target. Alerts go to your phone on Telegram, and the dashboard opens in any browser, including your phone.
+MarketPilot watches **Crude Oil Mini** and **Silver Mini** on MCX, and **Nifty 50, Bank Nifty, Sensex** (plus Fin Nifty, Midcap Nifty and Bankex if you switch them on) through your Angel One SmartAPI account. It tells you when to **BUY CE**, **BUY PE** or **EXIT**, with the strike, premium, stop-loss and target. Alerts go to your phone on Telegram, and the dashboard opens in any browser, including your phone.
 
 - **Signals only.** You place the orders yourself in the Angel One app. MarketPilot never places orders.
 - **Paper tracking.** Every signal is recorded with its paper result after estimated costs, so you can see if it is working before you trust it with money.
@@ -50,6 +50,8 @@ See **[DEPLOY.md](DEPLOY.md)**. One command installs MarketPilot on a small clou
 ```bash
 npm run backtest -- --product CRUDEOILM --days 60
 npm run backtest -- --product SILVERM --days 60
+npm run backtest -- --product NIFTY --days 120
+npm run backtest -- --product SENSEX --days 120
 npm run backtest -- --product SILVERM --csv my-1min-candles.csv   # your own data: time,open,high,low,close[,volume]
 ```
 
@@ -57,25 +59,26 @@ The backtest prints the number of trades, win rate, net result after costs, aver
 
 Things to know:
 
-- Angel One only provides history for contracts that still exist (the current and next month), so `--days` is limited by that. For longer tests, use `--csv` with your own data.
+- For MCX, Angel One only provides history for contracts that still exist (the current and next month), so `--days` is limited by that. Indices are tested on the spot index, which has long history. For longer MCX tests, use `--csv` with your own data.
 - Option results are **estimated** as futures points × 0.5 (delta) and ignore time decay. Expect real option results to be somewhat worse.
 
 Change the strategy settings in `.env`, backtest again, and only keep changes that hold up across both products and different months.
 
 ## 5. How the signals work
 
-The signals use **5-minute candles** of the futures contract that the options are based on:
+The signals use **5-minute candles**. For MCX the chart is the futures contract that the options settle into. For indices it is the spot index (Nifty 50, Sensex and so on).
 
 | Step | Rule |
 |---|---|
 | Trend | The 9-EMA crosses the 21-EMA (within the last 3 candles). Price is on the same side of the 50-EMA, by at least 0.25 × ATR, and the 50-EMA slopes that way. This chop filter avoids sideways whipsaws. |
 | Momentum | RSI 50–75 for a buy (not overbought), 25–50 for a sell (not oversold). |
 | Instrument | An up signal means **BUY CE**, a down signal means **BUY PE**, at the ATM strike (set `OPTION_STRIKE=ITM1/OTM1` to change). Crude can trade Mini futures instead with `CRUDE_TRADE=FUTURES`. |
-| Stop-loss | 1.5 × ATR from the futures entry. The option stop is estimated from it. |
+| Stop-loss | 1.5 × ATR from the chart entry. The option stop is estimated from it. |
 | Target | 2 × the stop distance (2R). |
 | Breakeven | After a 1R move in your favour, the stop moves to the entry price. |
-| Exit | Stop, target, an EMA crossover against the trade, or square-off at **23:15 IST**. |
-| Time window | New entries only between 09:15 and 22:45 IST. |
+| Exit | Stop, target, an EMA crossover against the trade, or square-off: **23:15 IST** for MCX, **15:15 IST** for indices. |
+| Time window | New entries 09:15–22:45 IST for MCX, 09:30–14:45 IST for indices. |
+| Expiry | The nearest option expiry that is **not today**, so on Nifty's weekly expiry day it uses next week's options. Set `SKIP_EXPIRY_DAY=false` to trade expiry-day options. |
 
 Every number above is a setting in `.env`.
 
@@ -86,6 +89,8 @@ The defaults are a ₹620 maximum loss per trade (2%), a ₹1,500 daily loss lim
 Realistic expectations for a ₹31k account:
 
 - **Crude Oil Mini CE/PE:** about ₹2–4k premium per lot, so these usually fit your limits.
+- **Nifty and Sensex CE/PE:** weekly options. One ATM lot is usually a few thousand to about ₹10k in premium, so these fit a ₹31k account. Lot sizes (Nifty 65, Sensex 20 today) are read from Angel One's contract list, so exchange revisions are picked up automatically.
+- **Bank Nifty, Fin Nifty, Midcap Nifty, Bankex:** monthly options only, so premiums are higher. Expect ⚠️ warnings more often.
 - **Silver Mini CE/PE:** often ₹20–30k premium per lot, and the estimated loss at stop is often above ₹620, so expect ⚠️ warnings. MCX has **no options on Silver Micro or Silver 100**, so Silver Mini is the smallest silver option.
 - Take one trade at a time and stop for the day when the daily limit warning appears. That is the "minimum loss" part, and it is up to you.
 
@@ -95,7 +100,7 @@ Realistic expectations for a ₹31k account:
 src/main.js          start-up (live, --demo, --check)
 src/smartapi.js      Angel One login (TOTP), instrument master, quotes, historical candles
 src/stream.js        SmartAPI WebSocket V2 live ticks (binary packet parser)
-src/contracts.js     picks the futures contract, option expiry and CE/PE strike
+src/contracts.js     picks the chart (futures or spot index), option expiry and CE/PE strike
 src/strategy.js      the strategy (shared by live desk and backtester)
 src/risk.js          one-lot plan: premium, option stop/target, rupee risk, warnings
 src/desk.js          ties it together: candles → signals → alerts → paper trades

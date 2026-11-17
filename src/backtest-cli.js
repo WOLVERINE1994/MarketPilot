@@ -9,7 +9,9 @@ import { istDay, istClock } from "./time.js";
 
 // Usage:
 //   npm run backtest -- --product CRUDEOILM --days 60
+//   npm run backtest -- --product NIFTY --days 120
 //   npm run backtest -- --product SILVERM --csv my-1min-data.csv
+//   npm run backtest -- --product SENSEX --csv sensex.csv --lot 20
 // CSV columns: time,open,high,low,close[,volume]  (time as ISO or "YYYY-MM-DD HH:MM" IST)
 const argv = process.argv.slice(2);
 const opt = name => { const i = argv.indexOf(`--${name}`); return i >= 0 ? argv[i + 1] : undefined; };
@@ -17,7 +19,8 @@ loadEnv();
 const config = readConfig();
 const productKey = (opt("product") || "CRUDEOILM").toUpperCase();
 const product = PRODUCTS[productKey];
-if (!product) { console.error(`Unknown product ${productKey}. Use CRUDEOILM or SILVERM.`); process.exit(1); }
+if (!product) { console.error(`Unknown product ${productKey}. Use one of: ${Object.keys(PRODUCTS).join(", ")}`); process.exit(1); }
+let lotSize = Number(opt("lot")) || product.multiplier || null; // index lot size comes from the option contracts (or --lot)
 const mode = (opt("mode") || (productKey === "CRUDEOILM" ? config.crudeTrade : "OPTIONS")).toUpperCase();
 
 function readCsv(file) {
@@ -35,16 +38,22 @@ async function fromAngel(days) {
   } });
   await client.login();
   const rows = await client.instruments([productKey]);
-  const { futures } = parseInstruments(rows, productKey);
-  const { future } = selectContracts(rows, product, istDay(Date.now()));
-  // Use the two nearest futures contracts and keep, for each minute, the nearer one's data.
-  const contracts = futures.filter(f => f.expiry >= istDay(Date.now())).slice(0, 2);
-  if (!contracts.length && future) contracts.push(future);
+  const today = istDay(Date.now());
+  const sel = selectContracts(rows, product, today, { skipExpiryDay: config.skipExpiryDay });
+  lotSize = Number(opt("lot")) || sel.multiplier || lotSize;
   const to = Date.now(), from = to - days * 86400000;
+  if (product.kind === "INDEX") {
+    if (!sel.underlying) throw new Error(`${product.label} index not found`);
+    console.log(`Downloading ${product.label} index 1-minute candles…`);
+    return client.candles(sel.underlying, from, to);
+  }
+  // MCX: use the two nearest futures contracts and keep, for each minute, the nearer one's data.
+  const { futures } = parseInstruments(rows, product);
+  const contracts = futures.filter(f => f.expiry >= today).slice(0, 2);
   const seen = new Map();
   for (const f of contracts.reverse()) {
     console.log(`Downloading ${f.symbol} 1-minute candles…`);
-    for (const c of await client.candles(f.token, from, to)) seen.set(c.time, c);
+    for (const c of await client.candles(f, from, to)) seen.set(c.time, c);
   }
   return [...seen.values()].sort((a, b) => a.time - b.time);
 }
@@ -52,9 +61,12 @@ async function fromAngel(days) {
 const days = Number(opt("days") || 60);
 const candles = opt("csv") ? readCsv(opt("csv")) : await fromAngel(days);
 if (!candles.length) { console.error("No candles to test."); process.exit(1); }
-const { trades, stats } = backtest(candles, { strategy: config.strategy, risk: config.risk, product, mode });
+if (!lotSize) lotSize = Number(opt("lot")) || null;
+if (!lotSize) { console.error(`Lot size unknown for ${product.label}; pass --lot <qty> (e.g. --lot 65 for Nifty).`); process.exit(1); }
+const strategy = product.kind === "INDEX" ? { ...config.strategy, ...config.indexSession } : config.strategy;
+const { trades, stats } = backtest(candles, { strategy, risk: config.risk, product: { ...product, multiplier: lotSize }, mode });
 const money = n => (n == null ? "—" : `${n < 0 ? "-" : ""}₹${Math.abs(n).toLocaleString("en-IN", { maximumFractionDigits: 0 })}`);
-console.log(`\n=== Backtest: ${product.label} · ${mode} · ${config.strategy.timeframe}m candles · ${istDay(candles[0].time)} → ${istDay(candles.at(-1).time)} ===`);
+console.log(`\n=== Backtest: ${product.label} · ${mode} · lot ${lotSize} · ${config.strategy.timeframe}m candles · ${istDay(candles[0].time)} → ${istDay(candles.at(-1).time)} ===`);
 console.log(`Trades ${stats.trades} | Win rate ${stats.winRate ?? "—"}% | Net ${money(stats.net)} after ₹${config.risk.costPerTrade}/trade costs`);
 console.log(`Avg win ${money(stats.avgWin)} | Avg loss ${money(stats.avgLoss)} | Profit factor ${stats.profitFactor ?? "—"} | Per trade ${money(stats.expectancy)}`);
 console.log(`Max drawdown ${money(stats.maxDrawdown)} | Worst losing streak ${stats.worstLosingStreak} | Green days ${stats.greenDays}/${stats.daysWithTrades} | Best day ${money(stats.bestDay)} | Worst day ${money(stats.worstDay)}`);

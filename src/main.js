@@ -26,12 +26,15 @@ async function check(client) {
   console.log("✅ Angel One login OK");
   const rows = await client.instruments(config.products);
   for (const key of config.products) {
-    const { future, optionExpiry, chain } = selectContracts(rows, PRODUCTS[key], istDay(Date.now()));
-    console.log(`\n${PRODUCTS[key].label}: future ${future?.symbol ?? "NOT FOUND"} (expiry ${future?.expiry ?? "-"}, lot ${future?.lotSize ?? "-"})`);
-    console.log(`  options: ${chain.length} contracts, expiry ${optionExpiry ?? "none"}`);
-    if (future) {
-      const q = (await client.quotes([future.token])).get(future.token);
-      console.log(`  last price: ${q?.ltp ?? "no quote"}`);
+    const product = PRODUCTS[key];
+    const { underlying, optionExpiry, chain, multiplier } = selectContracts(rows, product, istDay(Date.now()), { skipExpiryDay: config.skipExpiryDay });
+    console.log(`\n${product.label}: ${product.kind === "INDEX" ? "index" : "future"} ${underlying?.symbol ?? "NOT FOUND"} (${underlying ? `${underlying.exch} token ${underlying.token}` : "-"}${underlying?.expiry ? `, expiry ${underlying.expiry}` : ""})`);
+    console.log(`  options: ${chain.length} contracts on ${product.optionExch}, expiry ${optionExpiry ?? "none"}, lot size ${multiplier ?? "-"}`);
+    if (underlying) {
+      try {
+        const q = (await client.quotes([underlying])).get(`${underlying.exch}|${underlying.token}`);
+        console.log(`  last price: ${q?.ltp ?? "no quote"}`);
+      } catch (e) { console.log(`  quote failed: ${e.message}`); }
     }
   }
 }

@@ -24,6 +24,9 @@
   .summary { display:grid; grid-template-columns:repeat(4,1fr); gap:10px; }
   .kpi { background:var(--panel); border:1px solid var(--line); border-radius:12px; padding:10px 12px; }
   .kpi span { display:block; font-size:12px; color:var(--muted); } .kpi b { font-size:19px; }
+  .watch { display:flex; gap:8px; overflow-x:auto; padding-bottom:2px; scrollbar-width:none; }
+  .watch a { flex:0 0 auto; text-decoration:none; color:var(--text); background:var(--panel); border:1px solid var(--line); border-radius:12px; padding:7px 11px; font-size:12.5px; line-height:1.3; }
+  .watch a b { display:block; font-size:14px; } .watch a.buy { border-color:#2ea043; } .watch a.sell { border-color:#e5534b; }
   .grid { display:grid; grid-template-columns:1fr 1fr; gap:14px; }
   .card { background:var(--panel); border:1px solid var(--line); border-radius:14px; overflow:hidden; }
   .card-head { display:flex; align-items:baseline; gap:8px; padding:12px 14px 4px; }
@@ -70,6 +73,7 @@
     <div class="kpi"><span>Max loss / trade</span><b id="maxloss">—</b></div>
     <div class="kpi"><span>Daily loss limit left</span><b id="dailyleft">—</b></div>
   </section>
+  <nav class="watch" id="watch"></nav>
   <section class="grid" id="products"></section>
   <section class="panel"><h3>Signals</h3><div id="signals"></div></section>
   <section class="panel"><h3>Paper results <a href="/api/trades.csv">Download CSV</a></h3><div id="closed"></div></section>
@@ -119,19 +123,19 @@ function productCard(p, cfg) {
     const title = o.kind === "OPTION" ? `HOLD · ${o.symbol}` : `HOLD · ${o.side} FUT`;
     box = `<div class="signal ${o.side === "BUY" ? "buy" : "sell"}"><div class="act">${esc(title)}</div>
       <p>Entered ${ist(o.entryTime)} at ${o.kind === "OPTION" ? "premium ₹" + num(o.entryPrice) : num(o.entryPrice)} · now ${o.kind === "OPTION" ? "₹" + num(o.mark) : num(o.mark)} · paper P&amp;L <b class="${(o.pnl ?? 0) >= 0 ? "up" : "down"}">${money(o.pnl)}</b></p>
-      <div class="levels"><div><span>Futures stop</span><b>${num(o.stop, 0)}</b></div><div><span>Futures target</span><b>${num(o.target, 0)}</b></div>
+      <div class="levels"><div><span>${p.kind === "INDEX" ? "Index" : "Futures"} stop</span><b>${num(o.stop, 0)}</b></div><div><span>${p.kind === "INDEX" ? "Index" : "Futures"} target</span><b>${num(o.target, 0)}</b></div>
       <div><span>${plan?.kind === "OPTION" ? "Premium SL / TGT" : "Est. loss at SL"}</span><b>${plan?.kind === "OPTION" ? `₹${num(plan.premiumStop, 1)} / ₹${num(plan.premiumTarget, 1)}` : money(plan?.estLoss)}</b></div></div>
       ${(o.warnings || []).length ? `<ul class="warn-list">${o.warnings.map(w => `<li>${esc(w)}</li>`).join("")}</ul>` : ""}</div>`;
   } else {
     box = `<div class="signal"><div class="act">${p.status.ready ? "WAIT" : "WARMING UP"}</div><p>${esc(p.status.note)}</p></div>`;
   }
   const opts = p.options.map(o => `<div class="opt"><span>${o.type === "CE" ? "If BUY → " : "If SELL → "}${esc(o.symbol)}</span><b>₹${num(o.ltp, 1)}</b> <span>1 lot ≈ ${money(o.lotCost)}${o.lotCost > cfg.risk.capital ? " · above capital" : ""}</span></div>`).join("");
-  return `<article class="card">
-    <div class="card-head"><h2>${esc(p.label)}</h2><small>${esc(p.future.symbol)} · ${p.trade === "OPTIONS" ? "trades CE/PE" : "trades futures"}</small></div>
+  return `<article class="card" id="card-${p.key}">
+    <div class="card-head"><h2>${esc(p.label)}</h2><small>${esc(p.underlying.symbol)} · ${p.trade === "OPTIONS" ? "CE/PE" : "futures"}${p.lotSize ? ` · lot ${p.lotSize}` : ""} · ${p.session.entryStart}–${p.session.squareOff}</small></div>
     <div class="price"><b>${num(p.price, 0)}</b>${change != null ? `<span class="${change >= 0 ? "up" : "down"}">${change >= 0 ? "▲" : "▼"} ${num(Math.abs(change), 0)} (${num(change / p.prevClose * 100)}%)</span>` : ""}<span class="pill ${p.status.trend === "UPTREND" ? "ok" : p.status.trend === "DOWNTREND" ? "bad" : ""}">${esc(p.status.trend)}</span></div>
     ${box}
     ${chart(p.candles, p.open)}
-    <div class="meta"><span>EMA ${cfg.strategy.emaFast}/${cfg.strategy.emaSlow}/${cfg.strategy.emaTrend} <b>${num(p.status.emaFast, 0)} / ${num(p.status.emaSlow, 0)} / ${num(p.status.emaTrend, 0)}</b></span><span>RSI <b>${num(p.status.rsi, 1)}</b></span><span>ATR <b>${num(p.status.atr, 1)}</b></span><span>Options expiry <b>${p.optionExpiry ?? "—"}</b></span><span>Last tick <b>${ist(p.tickTime)}</b></span></div>
+    <div class="meta"><span>EMA ${cfg.strategy.emaFast}/${cfg.strategy.emaSlow}/${cfg.strategy.emaTrend} <b>${num(p.status.emaFast, 0)} / ${num(p.status.emaSlow, 0)} / ${num(p.status.emaTrend, 0)}</b></span><span>RSI <b>${num(p.status.rsi, 1)}</b></span><span>ATR <b>${num(p.status.atr, 1)}</b></span><span>Option expiry <b>${p.optionExpiry ?? "—"}</b></span><span>Last tick <b>${ist(p.tickTime)}</b></span></div>
     ${opts ? `<div class="opts">${opts}</div>` : ""}
     ${p.notes.length ? `<div class="meta">${p.notes.map(n => `<span class="down">${esc(n)}</span>`).join("")}</div>` : ""}
   </article>`;
@@ -151,13 +155,18 @@ function render(s) {
   $("maxloss").textContent = money(s.config.risk.maxLossPerTrade);
   const left = s.config.risk.dailyLossLimit + Math.min(0, s.day.pnl);
   $("dailyleft").textContent = money(Math.max(0, left)); $("dailyleft").className = left <= 0 ? "down" : "";
+  $("watch").innerHTML = s.products.map(p => {
+    const o = p.open, cls = o ? (o.side === "BUY" ? "buy" : "sell") : "";
+    const tag = o ? (o.kind === "OPTION" ? `HOLD ${o.symbol.slice(-2)}` : `HOLD ${o.side}`) : p.status.ready ? (p.status.trend === "UPTREND" ? "▲ up" : p.status.trend === "DOWNTREND" ? "▼ down" : "– flat") : "…";
+    return `<a href="#card-${p.key}" class="${cls}">${esc(p.label)}<b>${num(p.price, p.kind === "INDEX" ? 1 : 0)}</b><span class="${o ? (o.side === "BUY" ? "up" : "down") : p.status.trend === "UPTREND" ? "up" : p.status.trend === "DOWNTREND" ? "down" : ""}">${esc(tag)}</span></a>`;
+  }).join("");
   $("products").innerHTML = s.products.map(p => productCard(p, s.config)).join("") || '<div class="empty">Loading instruments…</div>';
-  $("signals").innerHTML = s.signals.length ? `<table><tr><th>Time</th><th>Instrument</th><th>Signal</th><th class="hide-sm">Futures entry / SL / TGT</th><th class="r">Result</th></tr>${s.signals.map(x => `<tr><td>${ist(x.time)}</td><td>${esc(x.label)}</td><td class="${x.side === "BUY" ? "up" : "down"}">${esc(x.plan.action)}${x.plan.strike ? " " + num(x.plan.strike, 0) : ""}${x.plan.premium ? ` @ ₹${num(x.plan.premium, 1)}` : ""}</td><td class="hide-sm">${num(x.futures.price, 0)} / ${num(x.futures.stop, 0)} / ${num(x.futures.target, 0)}</td><td class="r ${x.result ? (x.result.pnl >= 0 ? "up" : "down") : ""}">${x.result ? money(x.result.pnl) : "open"}</td></tr>`).join("")}</table>` : '<div class="empty">No signals yet today. The desk only signals on a fresh EMA crossover in the trend direction.</div>';
+  $("signals").innerHTML = s.signals.length ? `<table><tr><th>Time</th><th>Instrument</th><th>Signal</th><th class="hide-sm">Chart entry / SL / TGT</th><th class="r">Result</th></tr>${s.signals.map(x => `<tr><td>${ist(x.time)}</td><td>${esc(x.label)}</td><td class="${x.side === "BUY" ? "up" : "down"}">${esc(x.plan.action)}${x.plan.strike ? " " + num(x.plan.strike, 0) : ""}${x.plan.premium ? ` @ ₹${num(x.plan.premium, 1)}` : ""}</td><td class="hide-sm">${num(x.futures.price, 0)} / ${num(x.futures.stop, 0)} / ${num(x.futures.target, 0)}</td><td class="r ${x.result ? (x.result.pnl >= 0 ? "up" : "down") : ""}">${x.result ? money(x.result.pnl) : "open"}</td></tr>`).join("")}</table>` : '<div class="empty">No signals yet today. The desk only signals on a fresh EMA crossover in the trend direction.</div>';
   $("closed").innerHTML = s.closed.length ? `<table><tr><th>Exit</th><th>Instrument</th><th>Trade</th><th class="hide-sm">Reason</th><th class="r">P&amp;L</th></tr>${s.closed.slice(0, 25).map(t => `<tr><td>${ist(t.exitTime)}</td><td>${esc(t.label)}</td><td>${esc(t.kind === "OPTION" ? t.symbol : t.side + " FUT")}</td><td class="hide-sm">${esc(t.reason)}</td><td class="r ${t.pnl >= 0 ? "up" : "down"}">${money(t.pnl)}</td></tr>`).join("")}</table>` : '<div class="empty">Closed paper trades appear here with their result after estimated costs.</div>';
   const latest = s.signals[0]?.id ?? "";
   if (seen !== null && latest && latest !== seen && alertsOn) {
     const x = s.signals[0]; beep();
-    if ("Notification" in window && Notification.permission === "granted") new Notification(`${x.label}: ${x.plan.action}${x.plan.strike ? " " + x.plan.strike : ""}`, { body: `Futures ${num(x.futures.price, 0)} · SL ${num(x.futures.stop, 0)} · Target ${num(x.futures.target, 0)}` });
+    if ("Notification" in window && Notification.permission === "granted") new Notification(`${x.label}: ${x.plan.action}${x.plan.strike ? " " + x.plan.strike : ""}`, { body: `${x.futures.symbol} ${num(x.futures.price, 0)} · SL ${num(x.futures.stop, 0)} · Target ${num(x.futures.target, 0)}` });
   }
   seen = latest;
 }

@@ -1,39 +1,60 @@
 import { parseExpiry } from "./time.js";
 
-/** Normalize instrument-master rows for one product into futures and options. */
-export function parseInstruments(rows, productKey) {
+/** Tokens are only unique within an exchange, so every instrument is identified by exchange + token. */
+export const instKey = inst => `${inst.exch}|${inst.token}`;
+
+/**
+ * Normalize instrument-master rows for one product:
+ *  - futures (MCX commodities)
+ *  - spot index row (NSE/BSE indices)
+ *  - options (MCX OPTFUT or NFO/BFO OPTIDX)
+ */
+export function parseInstruments(rows, product) {
   const futures = [], options = [];
+  let spot = null;
   for (const r of rows) {
-    if (r.exch_seg !== "MCX" || r.name !== productKey) continue;
+    if (r.name !== product.key || !/^\d+$/.test(String(r.token))) continue;
+    if (product.kind === "INDEX" && r.exch_seg === product.exch && r.instrumenttype === "AMXIDX") {
+      spot = { exch: r.exch_seg, symbol: r.symbol, token: String(r.token), expiry: null, lotSize: 1, tickSize: 0.05 };
+      continue;
+    }
     const expiry = parseExpiry(r.expiry);
-    if (!expiry || !/^\d+$/.test(String(r.token))) continue;
-    const base = { symbol: r.symbol, token: String(r.token), expiry, lotSize: Number(r.lotsize), tickSize: Number(r.tick_size) / 100 || 1 };
-    if (/^FUT/.test(r.instrumenttype) && /FUT$/.test(r.symbol)) futures.push(base);
-    else if (r.instrumenttype === "OPTFUT" && /(CE|PE)$/.test(r.symbol)) {
+    if (!expiry) continue;
+    const base = { exch: r.exch_seg, symbol: r.symbol, token: String(r.token), expiry, lotSize: Number(r.lotsize), tickSize: Number(r.tick_size) / 100 || (product.kind === "INDEX" ? 0.05 : 1) };
+    if (product.kind === "COMMODITY" && r.exch_seg === product.exch && /^FUT/.test(r.instrumenttype) && /FUT$/.test(r.symbol)) futures.push(base);
+    else if (r.exch_seg === product.optionExch && /^OPT(FUT|IDX)$/.test(r.instrumenttype) && /(CE|PE)$/.test(r.symbol)) {
       const strike = Number(r.strike) / 100;
       if (Number.isFinite(strike) && strike > 0) options.push({ ...base, strike, type: r.symbol.slice(-2) });
     }
   }
   futures.sort((a, b) => a.expiry.localeCompare(b.expiry));
-  return { futures, options };
+  if (product.kind === "INDEX" && !spot && product.spotToken) {
+    spot = { exch: product.exch, symbol: product.label, token: product.spotToken, expiry: null, lotSize: 1, tickSize: 0.05 };
+  }
+  return { futures, options, spot };
 }
 
 /**
- * Pick the contracts to trade today (IST date `today`, "YYYY-MM-DD").
- * Expiry-day contracts are skipped: MCX options that expire in the money
- * devolve into futures, and liquidity has already moved to the next month.
+ * Pick what to watch and trade today (IST date `today`, "YYYY-MM-DD").
+ * `underlying` is the chart the strategy reads: the spot index for indices,
+ * or for MCX the futures contract the selected options settle into.
+ * By default contracts expiring today are skipped (expiry-day premiums decay
+ * very fast, and in-the-money MCX options devolve into futures).
  */
-export function selectContracts(rows, product, today) {
-  const { futures, options } = parseInstruments(rows, product.key);
+export function selectContracts(rows, product, today, { skipExpiryDay = true } = {}) {
+  const { futures, options, spot } = parseInstruments(rows, product);
+  const usable = e => (skipExpiryDay ? e > today : e >= today);
   let optionExpiry = null, chain = [];
   if (product.options) {
-    optionExpiry = [...new Set(options.map(o => o.expiry))].filter(e => e > today).sort()[0] ?? null;
+    optionExpiry = [...new Set(options.map(o => o.expiry))].filter(usable).sort()[0] ?? null;
     chain = options.filter(o => o.expiry === optionExpiry).sort((a, b) => a.strike - b.strike || a.type.localeCompare(b.type));
   }
-  // MCX options are options on a futures contract: follow the future that the
-  // selected options settle into (the nearest one expiring on/after them).
-  const future = futures.find(f => (optionExpiry ? f.expiry >= optionExpiry : f.expiry > today)) ?? futures.find(f => f.expiry > today) ?? null;
-  return { future, optionExpiry, chain };
+  let underlying;
+  if (product.kind === "INDEX") underlying = spot;
+  else underlying = futures.find(f => (optionExpiry ? f.expiry >= optionExpiry : f.expiry > today)) ?? futures.find(f => f.expiry > today) ?? null;
+  // P&L per point for one lot: index options carry it in their lot size.
+  const multiplier = product.kind === "INDEX" ? chain[0]?.lotSize || null : product.multiplier;
+  return { underlying, optionExpiry, chain, multiplier };
 }
 
 export const strikesOf = chain => [...new Set(chain.map(o => o.strike))].sort((a, b) => a - b);
